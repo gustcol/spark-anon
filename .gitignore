@@ -1,0 +1,188 @@
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# =============================================================================
+# Virtual Environments
+# =============================================================================
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# =============================================================================
+# IDEs and Editors
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+.spyderproject
+.spyproject
+
+# =============================================================================
+# Jupyter Notebooks
+# =============================================================================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# =============================================================================
+# macOS
+# =============================================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# =============================================================================
+# Windows
+# =============================================================================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msm
+*.msp
+*.lnk
+
+# =============================================================================
+# Linux
+# =============================================================================
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# =============================================================================
+# Spark / PySpark
+# =============================================================================
+spark-warehouse/
+metastore_db/
+derby.log
+*.log
+logs/
+
+# =============================================================================
+# Testing & Coverage
+# =============================================================================
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# =============================================================================
+# MyPy / Type Checking
+# =============================================================================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# =============================================================================
+# Ruff / Linting
+# =============================================================================
+.ruff_cache/
+
+# =============================================================================
+# Project Specific
+# =============================================================================
+# Audit logs (contain sensitive data)
+audit_logs/
+audit/
+
+# Lineage data
+lineage_data/
+lineage/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Configuration with secrets
+config.yaml
+config.yml
+*.local.yaml
+*.local.yml
+secrets.yaml
+secrets.yml
+
+# Data files (potentially sensitive)
+*.csv
+*.parquet
+*.json
+!package.json
+*.avro
+*.orc
+
+# Iceberg warehouse
+warehouse/
+iceberg-warehouse/
+
+# Delta Lake
+_delta_log/
+
+# Checkpoints
+checkpoints/
+checkpoint/
+
+# =============================================================================
+# Documentation Build
+# =============================================================================
+docs/_build/
+site/
+
+# =============================================================================
+# Misc
+# =============================================================================
+*.bak
+*.backup
+*.old
+.cache/
