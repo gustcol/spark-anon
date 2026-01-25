@@ -41,6 +41,7 @@ A comprehensive Spark library for managing metadata, tags, and GDPR compliance i
 - [Usage Examples](#usage-examples)
 - [Pandas Backend & Performance](#pandas-backend--performance)
 - [CLI Interface](#cli-interface)
+- [Integration with Apache Iceberg](#integration-with-apache-iceberg)
 - [Integration with Databricks & Unity Catalog](#integration-with-databricks--unity-catalog)
 - [Metadata Catalog](#metadata-catalog)
 - [Testing](#testing)
@@ -390,6 +391,7 @@ classDiagram
 | **AWS Glue Catalog** | AWS-native data governance | Art. 25 (Data protection by design) |
 | **ML PII Detection** | NLP-based PII identification | Art. 35 (Impact assessment) |
 | **Data Lineage Tracking** | Track data transformations | Art. 5, 30 (Accountability) |
+| **Apache Iceberg Support** | Table format agnostic processing | Art. 17, 25 (Erasure, Design) |
 
 ---
 
@@ -413,6 +415,12 @@ boto3 >= 1.26.0        # For AWS Glue integration
 spacy >= 3.5.0         # For ML PII detection (spaCy backend)
 transformers >= 4.30.0 # For ML PII detection (Hugging Face backend)
 ```
+
+**Optional (for Apache Iceberg):**
+```
+iceberg-spark-runtime >= 1.4.0  # Iceberg Spark runtime
+```
+Configure your Spark session with Iceberg extensions (see [Integration with Apache Iceberg](#integration-with-apache-iceberg)).
 
 **Optional (for Databricks):**
 - Databricks Runtime 11.3+
@@ -1573,6 +1581,267 @@ export SPART_ANONYMIZATION_K_ANONYMITY_DEFAULT_K=10
 
 # Override audit log path
 export SPART_AUDIT_LOG_PATH=/var/log/spart/audit
+```
+
+---
+
+## Integration with Apache Iceberg
+
+**spark-anon** is fully compatible with Apache Iceberg tables. Since the library operates on standard Spark DataFrames, any Iceberg table can be processed for GDPR compliance.
+
+### Spark Session Configuration
+
+```python
+from pyspark.sql import SparkSession
+
+# Configure Spark with Iceberg support
+spark = SparkSession.builder \
+    .appName("spark-anon-iceberg") \
+    .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkSessionCatalog") \
+    .config("spark.sql.catalog.spark_catalog.type", "hive") \
+    .config("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog") \
+    .config("spark.sql.catalog.local.type", "hadoop") \
+    .config("spark.sql.catalog.local.warehouse", "/path/to/warehouse") \
+    .getOrCreate()
+```
+
+### Reading and Processing Iceberg Tables
+
+```python
+from spart import (
+    MetadataManager, AnonymizationManager, AuditManager,
+    PIIDetector, RetentionManager
+)
+
+# Initialize managers
+audit = AuditManager(log_path="./audit_logs")
+metadata_mgr = MetadataManager(spark, audit_manager=audit)
+anon_mgr = AnonymizationManager(metadata_mgr, audit)
+
+# Read Iceberg table as DataFrame
+df = spark.table("local.db.customers")
+# OR using path
+df = spark.read.format("iceberg").load("/path/to/warehouse/db/customers")
+
+# Scan for PII
+detector = PIIDetector()
+scan_results = detector.full_scan(df)
+print(f"Potential PII columns: {scan_results['column_name_analysis']}")
+
+# Apply GDPR tags
+column_tags = {
+    "email": {"gdpr_category": "PII", "sensitivity": "HIGH", "retention_days": "365"},
+    "phone": {"gdpr_category": "PII", "sensitivity": "MEDIUM", "retention_days": "365"},
+    "ssn": {"gdpr_category": "SPI", "sensitivity": "VERY_HIGH", "retention_days": "180"}
+}
+tagged_df = metadata_mgr.apply_column_tags(df, column_tags)
+
+# Anonymize sensitive columns
+anonymized_df = anon_mgr.mask_columns(tagged_df, {
+    "email": "hash",
+    "phone": "partial",
+    "ssn": "redact"
+})
+
+# Write back to Iceberg (creates new table)
+anonymized_df.writeTo("local.db.customers_anonymized").create()
+
+# Or overwrite existing table
+anonymized_df.writeTo("local.db.customers_anonymized").createOrReplace()
+```
+
+### Iceberg Time Travel for GDPR Compliance
+
+Iceberg's time travel feature is valuable for GDPR compliance auditing:
+
+```python
+# Read historical snapshot (before anonymization)
+df_before = spark.read \
+    .option("snapshot-id", 123456789) \
+    .format("iceberg") \
+    .load("/path/to/warehouse/db/customers")
+
+# Read data as of specific timestamp
+df_historical = spark.read \
+    .option("as-of-timestamp", "2024-01-01 00:00:00") \
+    .format("iceberg") \
+    .load("/path/to/warehouse/db/customers")
+
+# Compare with current data for audit trail
+current_df = spark.table("local.db.customers")
+```
+
+### Iceberg Schema Evolution with GDPR Tags
+
+```python
+# When schema evolves, reapply GDPR tags to new columns
+from pyspark.sql import functions as F
+
+# Add new column to Iceberg table
+spark.sql("""
+    ALTER TABLE local.db.customers
+    ADD COLUMNS (loyalty_id STRING)
+""")
+
+# Read updated schema
+df = spark.table("local.db.customers")
+
+# Update tags to include new column
+updated_tags = {
+    **column_tags,
+    "loyalty_id": {"gdpr_category": "PII", "sensitivity": "LOW", "retention_days": "730"}
+}
+tagged_df = metadata_mgr.apply_column_tags(df, updated_tags)
+```
+
+### Iceberg Partitioning for Retention Policies
+
+```python
+# Create Iceberg table with date partitioning for efficient retention
+spark.sql("""
+    CREATE TABLE local.db.customers_partitioned (
+        user_id STRING,
+        email STRING,
+        created_date DATE
+    )
+    USING iceberg
+    PARTITIONED BY (months(created_date))
+""")
+
+# Apply retention policy (removes old partitions efficiently)
+retention_mgr = RetentionManager(metadata_mgr, audit)
+compliant_df = retention_mgr.apply_retention_policy(df, "created_date")
+
+# Iceberg handles partition pruning automatically
+compliant_df.writeTo("local.db.customers_partitioned").overwritePartitions()
+```
+
+### Data Subject Erasure with Iceberg
+
+```python
+# Handle GDPR erasure request
+user_to_erase = "USR12345"
+
+# Read current data
+df = spark.table("local.db.customers")
+
+# Apply erasure
+erased_df = anon_mgr.request_erasure(df, "user_id", user_to_erase)
+
+# Write back using Iceberg's MERGE for efficient updates
+erased_df.createOrReplaceTempView("erased_customers")
+
+spark.sql("""
+    MERGE INTO local.db.customers t
+    USING erased_customers s
+    ON t.user_id = s.user_id
+    WHEN MATCHED THEN UPDATE SET *
+""")
+
+# Iceberg maintains history - run expire_snapshots for true deletion
+spark.sql("""
+    CALL local.system.expire_snapshots(
+        table => 'db.customers',
+        older_than => TIMESTAMP '2024-01-01 00:00:00',
+        retain_last => 1
+    )
+""")
+```
+
+### Complete Iceberg GDPR Pipeline
+
+```mermaid
+flowchart LR
+    subgraph "Source"
+        ICE[(Iceberg Table)]
+    end
+
+    subgraph "spark-anon Processing"
+        READ[Read DataFrame]
+        SCAN[PII Detection]
+        TAG[Apply GDPR Tags]
+        ANON[Anonymization]
+        RET[Retention Policy]
+    end
+
+    subgraph "Output"
+        ICE_OUT[(Iceberg Table\nAnonymized)]
+        AUDIT[(Audit Log)]
+    end
+
+    ICE --> READ --> SCAN --> TAG --> ANON --> RET
+    RET --> ICE_OUT
+    TAG --> AUDIT
+    ANON --> AUDIT
+```
+
+### Architecture: Iceberg + spark-anon
+
+```mermaid
+flowchart TB
+    subgraph "Data Lake"
+        subgraph "Iceberg Catalog"
+            CAT[Catalog]
+            DB[Database]
+            TBL[Tables]
+            SNAP[Snapshots]
+
+            CAT --> DB --> TBL --> SNAP
+        end
+    end
+
+    subgraph "spark-anon"
+        MM[MetadataManager]
+        AM[AnonymizationManager]
+        RM[RetentionManager]
+        AU[AuditManager]
+
+        MM --> AM --> RM
+        MM --> AU
+        AM --> AU
+        RM --> AU
+    end
+
+    subgraph "GDPR Compliance"
+        PII[PII Detection]
+        ANON[Anonymization]
+        ERASE[Right to Erasure]
+        RETAIN[Retention Policy]
+        AUDIT[Audit Trail]
+    end
+
+    TBL <--> MM
+    SNAP -.->|Time Travel| AUDIT
+
+    MM --> PII
+    AM --> ANON
+    AM --> ERASE
+    RM --> RETAIN
+    AU --> AUDIT
+```
+
+### Supported Iceberg Catalogs
+
+| Catalog Type | Configuration | Use Case |
+|--------------|---------------|----------|
+| Hive Metastore | `type=hive` | Enterprise data warehouses |
+| Hadoop | `type=hadoop` | Local/HDFS storage |
+| AWS Glue | `type=glue` | AWS-native workloads |
+| Nessie | `type=nessie` | Git-like versioning |
+| REST | `type=rest` | Custom catalog services |
+
+**AWS Glue Catalog Example:**
+```python
+spark = SparkSession.builder \
+    .config("spark.sql.catalog.glue", "org.apache.iceberg.spark.SparkCatalog") \
+    .config("spark.sql.catalog.glue.catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog") \
+    .config("spark.sql.catalog.glue.warehouse", "s3://my-bucket/warehouse") \
+    .getOrCreate()
+
+# Use with spark-anon
+df = spark.table("glue.my_database.customers")
+tagged_df = metadata_mgr.apply_column_tags(df, column_tags)
 ```
 
 ---
