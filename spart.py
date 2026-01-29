@@ -2,7 +2,7 @@
 spark-anon: Spark GDPR & Privacy Library
 
 A comprehensive library for managing metadata, tags, and GDPR compliance
-in data processing pipelines. Supports both PySpark and Pandas backends
+in data processing pipelines. Supports PySpark, Pandas, and Polars backends
 with automatic optimization based on data size.
 
 Features:
@@ -16,14 +16,19 @@ Features:
 - Data subject erasure requests
 - YAML configuration support
 - CLI interface
-- Pandas backend for faster processing on smaller datasets
-- Benchmarking utilities
+- Three-tier backend system:
+  * Polars: Fast single-machine processing (recommended for 10k-500k rows)
+  * Pandas: Simple in-memory processing (for small datasets)
+  * Spark: Distributed processing (for large datasets >500k rows)
+- Benchmarking utilities for backend comparison
 
 Usage:
     from spart import (
         MetadataManager, RetentionManager, AnonymizationManager,
-        ConsentManager, AuditManager, ConfigManager, PandasProcessor,
-        AdvancedAnonymization, PIIDetector, StreamingManager, Benchmark
+        ConsentManager, AuditManager, ConfigManager,
+        PandasProcessor, PolarsProcessor,  # Backend processors
+        AdvancedAnonymization, PIIDetector, StreamingManager, Benchmark,
+        BackendSelector, ProcessingBackend  # Backend selection
     )
 """
 
@@ -49,21 +54,41 @@ from functools import wraps
 from pathlib import Path
 
 # Optional imports for extended functionality
-try:
+# Type hints for optional modules
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
     import pandas as pd
     import numpy as np
-    PANDAS_AVAILABLE = True
-except ImportError:
-    PANDAS_AVAILABLE = False
-    pd = None
-    np = None
+    import yaml
+    import polars as pl
+
+PANDAS_AVAILABLE = False
+YAML_AVAILABLE = False
+POLARS_AVAILABLE = False
+pd: Any = None
+np: Any = None
+yaml: Any = None
+pl: Any = None
 
 try:
-    import yaml
+    import pandas as pd  # type: ignore[no-redef]
+    import numpy as np  # type: ignore[no-redef]
+    PANDAS_AVAILABLE = True
+except ImportError:
+    pass
+
+try:
+    import yaml  # type: ignore[no-redef]
     YAML_AVAILABLE = True
 except ImportError:
-    YAML_AVAILABLE = False
-    yaml = None
+    pass
+
+try:
+    import polars as pl  # type: ignore[no-redef]
+    POLARS_AVAILABLE = True
+except ImportError:
+    pass
 
 # Basic logging configuration
 logging.basicConfig(
@@ -120,6 +145,7 @@ class ProcessingBackend(Enum):
     """Data processing backend selection."""
     SPARK = "spark"
     PANDAS = "pandas"
+    POLARS = "polars"
     AUTO = "auto"
 
 
@@ -506,7 +532,7 @@ class AuditManager:
         subject_ids: Optional[List[str]] = None,
         success: bool = True,
         error_message: Optional[str] = None
-    ) -> AuditEvent:
+    ) -> Optional[AuditEvent]:
         """
         Log an audit event.
 
@@ -1945,15 +1971,501 @@ class PandasProcessor:
 
 
 # ==============================================================================
+# Polars Processor (High-Performance Backend)
+# ==============================================================================
+
+
+class PolarsProcessor:
+    """
+    High-performance data processing using Polars for medium-sized datasets.
+
+    Provides the same anonymization and metadata functions as the Spark and
+    Pandas processors but optimized for single-machine parallel processing
+    with Polars (Rust-based, 5-10x faster than Pandas for most operations).
+
+    Polars is ideal for datasets between 50k-500k rows where:
+    - Pandas becomes slow due to Python overhead
+    - Spark overhead isn't justified for single-machine processing
+    """
+
+    def __init__(self, config: Optional[ConfigManager] = None):
+        """
+        Initialize the Polars processor.
+
+        Args:
+            config: ConfigManager for settings.
+
+        Raises:
+            ImportError: If polars is not installed.
+        """
+        if not POLARS_AVAILABLE:
+            raise ImportError(
+                "Polars is required for PolarsProcessor. "
+                "Install it with: pip install polars"
+            )
+
+        self.config = config or ConfigManager()
+        self._column_tags: Dict[str, Dict[str, Any]] = {}
+        self._dataset_tags: Dict[str, Any] = {}
+
+    def apply_column_tags(
+        self,
+        df: pl.DataFrame,
+        column_tags: Dict[str, Dict[str, Any]]
+    ) -> pl.DataFrame:
+        """
+        Apply GDPR tags to columns (stored in memory).
+
+        Args:
+            df: Polars DataFrame.
+            column_tags: Dictionary of column tags.
+
+        Returns:
+            Same DataFrame (tags stored internally).
+        """
+        # Validate tags
+        for col_name, tags in column_tags.items():
+            if col_name not in df.columns:
+                logger.warning(f"Column '{col_name}' not in DataFrame")
+                continue
+
+            if "gdpr_category" in tags:
+                if tags["gdpr_category"] not in ["PII", "SPI", "NPII"]:
+                    raise ValueError(
+                        f"Invalid GDPR category: {tags['gdpr_category']}"
+                    )
+
+            if "sensitivity" in tags:
+                if tags["sensitivity"] not in ["LOW", "MEDIUM", "HIGH", "VERY_HIGH"]:
+                    raise ValueError(
+                        f"Invalid sensitivity: {tags['sensitivity']}"
+                    )
+
+            self._column_tags[col_name] = tags
+
+        return df
+
+    def get_column_tags(self) -> Dict[str, Dict[str, Any]]:
+        """Get all applied column tags."""
+        return self._column_tags.copy()
+
+    def mask_columns(
+        self,
+        df: pl.DataFrame,
+        mask_rules: Dict[str, str]
+    ) -> pl.DataFrame:
+        """
+        Apply masking to columns using Polars (vectorized operations).
+
+        Args:
+            df: Input DataFrame.
+            mask_rules: Dictionary mapping columns to mask types.
+
+        Returns:
+            DataFrame with masked columns.
+        """
+        result = df.clone()
+
+        for column, mask_type in mask_rules.items():
+            if column not in result.columns:
+                logger.warning(f"Column '{column}' not found")
+                continue
+
+            if mask_type == "hash":
+                # Use map_elements for hashing (Polars doesn't have native SHA256)
+                result = result.with_columns(
+                    pl.col(column).cast(pl.Utf8).map_elements(
+                        lambda x: hashlib.sha256(str(x).encode()).hexdigest(),
+                        return_dtype=pl.Utf8
+                    ).alias(column)
+                )
+            elif mask_type == "partial":
+                # Partial masking: show first 3 and last 3 chars
+                result = result.with_columns(
+                    pl.col(column).cast(pl.Utf8).map_elements(
+                        lambda x: f"{x[:3]}***{x[-3:]}" if len(str(x)) > 6 else "***",
+                        return_dtype=pl.Utf8
+                    ).alias(column)
+                )
+            elif mask_type == "redact":
+                # Full redaction - vectorized
+                result = result.with_columns(
+                    pl.lit("[REDACTED]").alias(column)
+                )
+            else:
+                raise ValueError(f"Unknown mask type: {mask_type}")
+
+        return result
+
+    def pseudonymize_columns(
+        self,
+        df: pl.DataFrame,
+        columns: List[str],
+        salt: Optional[str] = None
+    ) -> pl.DataFrame:
+        """
+        Pseudonymize columns with consistent hashing.
+
+        Args:
+            df: Input DataFrame.
+            columns: Columns to pseudonymize.
+            salt: Salt for consistent hashing.
+
+        Returns:
+            DataFrame with pseudonymized columns.
+        """
+        result = df.clone()
+        salt_value = salt or str(uuid.uuid4())
+
+        for column in columns:
+            if column not in result.columns:
+                continue
+
+            result = result.with_columns(
+                pl.col(column).cast(pl.Utf8).map_elements(
+                    lambda x: hashlib.sha256(f"{x}:{salt_value}".encode()).hexdigest(),
+                    return_dtype=pl.Utf8
+                ).alias(column)
+            )
+
+        return result
+
+    def auto_anonymize(self, df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Automatically anonymize based on column tags.
+
+        Args:
+            df: Input DataFrame.
+
+        Returns:
+            Anonymized DataFrame.
+        """
+        mask_rules = {}
+        pseudo_cols = []
+
+        for col_name, tags in self._column_tags.items():
+            category = tags.get("gdpr_category")
+            sensitivity = tags.get("sensitivity")
+
+            if category == "PII" and sensitivity in ["HIGH", "VERY_HIGH"]:
+                mask_rules[col_name] = "hash"
+            elif category == "PII" and sensitivity == "MEDIUM":
+                mask_rules[col_name] = "partial"
+            elif category == "SPI":
+                pseudo_cols.append(col_name)
+
+        result = self.mask_columns(df, mask_rules)
+        result = self.pseudonymize_columns(result, pseudo_cols)
+
+        return result
+
+    def request_erasure(
+        self,
+        df: pl.DataFrame,
+        identifier_col: str,
+        identifier_value: str
+    ) -> pl.DataFrame:
+        """
+        Handle erasure request by nullifying PII/SPI.
+
+        Args:
+            df: Input DataFrame.
+            identifier_col: Column identifying the subject.
+            identifier_value: Value to match.
+
+        Returns:
+            DataFrame with erased data.
+        """
+        # Find columns to erase
+        cols_to_erase = [
+            col for col, tags in self._column_tags.items()
+            if tags.get("gdpr_category") in ["PII", "SPI"]
+            and col != identifier_col
+        ]
+
+        # Build expressions for conditional null
+        exprs = []
+        for col in df.columns:
+            if col in cols_to_erase:
+                exprs.append(
+                    pl.when(pl.col(identifier_col).cast(pl.Utf8) == str(identifier_value))
+                    .then(pl.lit(None))
+                    .otherwise(pl.col(col))
+                    .alias(col)
+                )
+            else:
+                exprs.append(pl.col(col))
+
+        return df.select(exprs)
+
+    def k_anonymize(
+        self,
+        df: pl.DataFrame,
+        quasi_identifiers: List[str],
+        k: int = 5
+    ) -> pl.DataFrame:
+        """
+        Apply k-anonymity using Polars (optimized group operations).
+
+        Args:
+            df: Input DataFrame.
+            quasi_identifiers: Quasi-identifier columns.
+            k: Minimum group size.
+
+        Returns:
+            K-anonymized DataFrame.
+        """
+        # Count occurrences of each QI combination
+        counts = df.group_by(quasi_identifiers).agg(
+            pl.count().alias("_count")
+        )
+
+        # Filter valid groups (count >= k)
+        valid_groups = counts.filter(pl.col("_count") >= k).drop("_count")
+
+        # Join back to keep only valid records
+        result = df.join(valid_groups, on=quasi_identifiers, how="inner")
+
+        suppressed = len(df) - len(result)
+        logger.info(f"K-anonymity (k={k}): {suppressed} records suppressed")
+
+        return result
+
+    def add_differential_privacy_noise(
+        self,
+        df: pl.DataFrame,
+        numeric_columns: List[str],
+        epsilon: float = 1.0,
+        sensitivity: float = 1.0
+    ) -> pl.DataFrame:
+        """
+        Add Laplace noise for differential privacy.
+
+        Args:
+            df: Input DataFrame.
+            numeric_columns: Columns to add noise to.
+            epsilon: Privacy parameter (lower = more privacy, more noise).
+            sensitivity: Query sensitivity.
+
+        Returns:
+            DataFrame with noise added.
+        """
+        result = df.clone()
+        scale = sensitivity / epsilon
+        n_rows = len(df)
+
+        for col in numeric_columns:
+            if col in result.columns:
+                # Generate Laplace noise using numpy (required for Laplace distribution)
+                if not PANDAS_AVAILABLE:
+                    raise ImportError("NumPy is required for differential privacy")
+                noise = np.random.laplace(0, scale, n_rows)
+                noise_series = pl.Series("_noise", noise)
+
+                result = result.with_columns(
+                    (pl.col(col) + noise_series).alias(col)
+                )
+
+        return result
+
+    def generalize_numeric(
+        self,
+        df: pl.DataFrame,
+        column: str,
+        bin_size: float = 10.0
+    ) -> pl.DataFrame:
+        """
+        Generalize numeric values into ranges.
+
+        Args:
+            df: Input DataFrame.
+            column: Column to generalize.
+            bin_size: Size of each bin.
+
+        Returns:
+            DataFrame with generalized column.
+        """
+        return df.with_columns(
+            ((pl.col(column) / bin_size).floor() * bin_size).cast(pl.Int64).cast(pl.Utf8)
+            .str.concat_horizontal(
+                pl.lit("-"),
+                (((pl.col(column) / bin_size).floor() + 1) * bin_size).cast(pl.Int64).cast(pl.Utf8)
+            ).alias(column)
+        )
+
+    def generalize_date(
+        self,
+        df: pl.DataFrame,
+        column: str,
+        level: str = "month"
+    ) -> pl.DataFrame:
+        """
+        Generalize date values to reduce precision.
+
+        Args:
+            df: Input DataFrame.
+            column: Date column to generalize.
+            level: Generalization level ('year', 'month', 'quarter').
+
+        Returns:
+            DataFrame with generalized dates.
+        """
+        if level == "year":
+            return df.with_columns(
+                pl.col(column).dt.year().cast(pl.Utf8).alias(column)
+            )
+        elif level == "month":
+            return df.with_columns(
+                (pl.col(column).dt.year().cast(pl.Utf8) + pl.lit("-") +
+                 pl.col(column).dt.month().cast(pl.Utf8).str.zfill(2)).alias(column)
+            )
+        elif level == "quarter":
+            return df.with_columns(
+                (pl.col(column).dt.year().cast(pl.Utf8) + pl.lit("-Q") +
+                 pl.col(column).dt.quarter().cast(pl.Utf8)).alias(column)
+            )
+        else:
+            raise ValueError(f"Unknown generalization level: {level}")
+
+    def check_k_anonymity(
+        self,
+        df: pl.DataFrame,
+        quasi_identifiers: List[str],
+        k: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Check if DataFrame satisfies k-anonymity.
+
+        Args:
+            df: Input DataFrame.
+            quasi_identifiers: Quasi-identifier columns.
+            k: Minimum group size required.
+
+        Returns:
+            Dictionary with k-anonymity analysis results.
+        """
+        # Count group sizes
+        counts = df.group_by(quasi_identifiers).agg(
+            pl.count().alias("_count")
+        )
+
+        min_count = counts.select(pl.col("_count").min()).item()
+        max_count = counts.select(pl.col("_count").max()).item()
+        total_groups = len(counts)
+        violating_groups = len(counts.filter(pl.col("_count") < k))
+
+        return {
+            "is_k_anonymous": min_count >= k,
+            "k_value": k,
+            "min_group_size": min_count,
+            "max_group_size": max_count,
+            "total_groups": total_groups,
+            "violating_groups": violating_groups,
+            "compliance_rate": round((total_groups - violating_groups) / total_groups * 100, 2)
+        }
+
+    def export_metadata_catalog(
+        self,
+        df: pl.DataFrame,
+        path: str
+    ) -> None:
+        """
+        Export metadata catalog to JSON.
+
+        Args:
+            df: DataFrame with applied tags.
+            path: Output file path.
+        """
+        catalog = {
+            "dataset_metadata": self._dataset_tags,
+            "column_metadata": self._column_tags,
+            "schema": {col: str(dtype) for col, dtype in zip(df.columns, df.dtypes)},
+            "row_count": len(df),
+            "exported_at": datetime.datetime.now().isoformat(),
+            "backend": "polars"
+        }
+
+        with open(path, 'w') as f:
+            json.dump(catalog, f, indent=2)
+
+        logger.info(f"Metadata catalog exported to {path}")
+
+    @staticmethod
+    def from_pandas(df: pd.DataFrame) -> pl.DataFrame:
+        """
+        Convert Pandas DataFrame to Polars.
+
+        Args:
+            df: Pandas DataFrame.
+
+        Returns:
+            Polars DataFrame.
+        """
+        if not POLARS_AVAILABLE:
+            raise ImportError("Polars is not available")
+        return pl.from_pandas(df)
+
+    @staticmethod
+    def to_pandas(df: pl.DataFrame) -> pd.DataFrame:
+        """
+        Convert Polars DataFrame to Pandas.
+
+        Args:
+            df: Polars DataFrame.
+
+        Returns:
+            Pandas DataFrame.
+        """
+        if not PANDAS_AVAILABLE:
+            raise ImportError("Pandas is not available")
+        return df.to_pandas()
+
+    @staticmethod
+    def from_spark(spark_df: DataFrame) -> pl.DataFrame:
+        """
+        Convert Spark DataFrame to Polars via Arrow.
+
+        Args:
+            spark_df: Spark DataFrame.
+
+        Returns:
+            Polars DataFrame.
+        """
+        if not POLARS_AVAILABLE:
+            raise ImportError("Polars is not available")
+        # Convert via Pandas (Spark -> Pandas -> Polars)
+        # This uses Arrow under the hood for efficiency
+        pandas_df = spark_df.toPandas()
+        return pl.from_pandas(pandas_df)
+
+    @staticmethod
+    def to_spark(polars_df: pl.DataFrame, spark: SparkSession) -> DataFrame:
+        """
+        Convert Polars DataFrame to Spark.
+
+        Args:
+            polars_df: Polars DataFrame.
+            spark: SparkSession.
+
+        Returns:
+            Spark DataFrame.
+        """
+        # Convert via Pandas (Polars -> Pandas -> Spark)
+        pandas_df = polars_df.to_pandas()
+        return spark.createDataFrame(pandas_df)
+
+
+# ==============================================================================
 # Benchmark Utilities
 # ==============================================================================
 
 
 class Benchmark:
     """
-    Benchmarking utilities to compare Spark vs Pandas performance.
+    Benchmarking utilities to compare Spark vs Pandas vs Polars performance.
 
-    Helps users choose the optimal backend for their data size.
+    Helps users choose the optimal backend for their data size by measuring
+    actual execution times across all available backends.
     """
 
     def __init__(
@@ -1984,16 +2496,18 @@ class Benchmark:
         operation_name: str,
         spark_func: Optional[Callable] = None,
         pandas_func: Optional[Callable] = None,
+        polars_func: Optional[Callable] = None,
         row_count: int = 0,
         column_count: int = 0
     ) -> Dict[str, BenchmarkResult]:
         """
-        Benchmark an operation on both backends.
+        Benchmark an operation on all available backends.
 
         Args:
             operation_name: Name of the operation being benchmarked.
             spark_func: Function to run on Spark.
             pandas_func: Function to run on Pandas.
+            polars_func: Function to run on Polars.
             row_count: Number of rows in the dataset.
             column_count: Number of columns in the dataset.
 
@@ -2026,20 +2540,34 @@ class Benchmark:
             results["pandas"] = result
             self.results.append(result)
 
+        if polars_func and POLARS_AVAILABLE:
+            _, polars_time = self._measure_time(polars_func)
+            result = BenchmarkResult(
+                operation=operation_name,
+                backend="polars",
+                row_count=row_count,
+                column_count=column_count,
+                execution_time_seconds=polars_time
+            )
+            results["polars"] = result
+            self.results.append(result)
+
         return results
 
     def run_anonymization_benchmark(
         self,
         spark_df: Optional[DataFrame] = None,
         pandas_df: Optional[pd.DataFrame] = None,
+        polars_df: Optional[pl.DataFrame] = None,
         columns_to_mask: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
-        Run a comprehensive anonymization benchmark.
+        Run a comprehensive anonymization benchmark across all backends.
 
         Args:
             spark_df: Spark DataFrame for testing.
             pandas_df: Pandas DataFrame for testing.
+            polars_df: Polars DataFrame for testing.
             columns_to_mask: Columns to apply masking to.
 
         Returns:
@@ -2056,9 +2584,12 @@ class Benchmark:
         # Get dimensions
         spark_rows = spark_df.count() if spark_df else 0
         pandas_rows = len(pandas_df) if pandas_df is not None else 0
-        row_count = spark_rows or pandas_rows
-        col_count = len(spark_df.columns) if spark_df else (
-            len(pandas_df.columns) if pandas_df is not None else 0
+        polars_rows = len(polars_df) if polars_df is not None else 0
+        row_count = spark_rows or pandas_rows or polars_rows
+        col_count = (
+            len(spark_df.columns) if spark_df else
+            len(pandas_df.columns) if pandas_df is not None else
+            len(polars_df.columns) if polars_df is not None else 0
         )
 
         # Hash masking benchmark
@@ -2076,10 +2607,16 @@ class Benchmark:
                 proc = PandasProcessor()
                 return len(proc.mask_columns(pandas_df, mask_rules))
 
+        def polars_hash():
+            if polars_df is not None:
+                proc = PolarsProcessor()
+                return len(proc.mask_columns(polars_df, mask_rules))
+
         results["operations"]["hash_masking"] = self.benchmark_operation(
             "hash_masking",
             spark_hash if spark_df else None,
             pandas_hash if pandas_df is not None else None,
+            polars_hash if polars_df is not None else None,
             row_count,
             col_count
         )
@@ -2101,13 +2638,48 @@ class Benchmark:
                     pandas_df, columns_to_mask, "salt"
                 ))
 
+        def polars_pseudo():
+            if polars_df is not None:
+                proc = PolarsProcessor()
+                return len(proc.pseudonymize_columns(
+                    polars_df, columns_to_mask, "salt"
+                ))
+
         results["operations"]["pseudonymization"] = self.benchmark_operation(
             "pseudonymization",
             spark_pseudo if spark_df else None,
             pandas_pseudo if pandas_df is not None else None,
+            polars_pseudo if polars_df is not None else None,
             row_count,
             col_count
         )
+
+        # K-anonymity benchmark (if quasi-identifiers available)
+        if len(columns_to_mask) >= 2:
+            def spark_kanon():
+                if spark_df:
+                    from spart import AdvancedAnonymization
+                    adv = AdvancedAnonymization(self.spark)
+                    return adv.k_anonymize(spark_df, columns_to_mask[:2], k=2).count()
+
+            def pandas_kanon():
+                if pandas_df is not None:
+                    proc = PandasProcessor()
+                    return len(proc.k_anonymize(pandas_df, columns_to_mask[:2], k=2))
+
+            def polars_kanon():
+                if polars_df is not None:
+                    proc = PolarsProcessor()
+                    return len(proc.k_anonymize(polars_df, columns_to_mask[:2], k=2))
+
+            results["operations"]["k_anonymity"] = self.benchmark_operation(
+                "k_anonymity",
+                spark_kanon if spark_df else None,
+                pandas_kanon if pandas_df is not None else None,
+                polars_kanon if polars_df is not None else None,
+                row_count,
+                col_count
+            )
 
         # Calculate summary
         spark_total = sum(
@@ -2118,18 +2690,36 @@ class Benchmark:
             r.execution_time_seconds for r in self.results
             if r.backend == "pandas"
         )
+        polars_total = sum(
+            r.execution_time_seconds for r in self.results
+            if r.backend == "polars"
+        )
+
+        # Find fastest backend
+        times = {}
+        if spark_total > 0:
+            times["spark"] = spark_total
+        if pandas_total > 0:
+            times["pandas"] = pandas_total
+        if polars_total > 0:
+            times["polars"] = polars_total
+
+        fastest = min(times, key=times.get) if times else "spark"
 
         results["summary"] = {
             "row_count": row_count,
             "column_count": col_count,
             "spark_total_seconds": spark_total,
             "pandas_total_seconds": pandas_total,
-            "faster_backend": "pandas" if pandas_total < spark_total else "spark",
-            "speedup_factor": (
-                spark_total / pandas_total if pandas_total > 0 else float('inf')
-            ) if spark_total > pandas_total else (
-                pandas_total / spark_total if spark_total > 0 else float('inf')
-            ),
+            "polars_total_seconds": polars_total,
+            "fastest_backend": fastest,
+            "speedup_vs_spark": {
+                "pandas": round(spark_total / pandas_total, 2) if pandas_total > 0 else None,
+                "polars": round(spark_total / polars_total, 2) if polars_total > 0 else None
+            },
+            "speedup_vs_pandas": {
+                "polars": round(pandas_total / polars_total, 2) if polars_total > 0 else None
+            },
             "recommendation": self._get_recommendation(row_count)
         }
 
@@ -2137,20 +2727,111 @@ class Benchmark:
 
     def _get_recommendation(self, row_count: int) -> str:
         """Get backend recommendation based on row count."""
-        threshold = self.config.get(
-            "processing", "pandas_threshold_rows", default=100000
+        pandas_threshold = self.config.get(
+            "processing", "pandas_threshold_rows", default=50000
+        )
+        polars_threshold = self.config.get(
+            "processing", "polars_threshold_rows", default=500000
         )
 
-        if row_count <= threshold:
-            return (
-                f"Use PANDAS for datasets <= {threshold:,} rows. "
-                f"Current: {row_count:,} rows."
-            )
+        if row_count <= pandas_threshold:
+            if POLARS_AVAILABLE:
+                return (
+                    f"Use POLARS for small datasets (<= {pandas_threshold:,} rows). "
+                    f"Current: {row_count:,} rows. Polars offers best single-threaded performance."
+                )
+            else:
+                return (
+                    f"Use PANDAS for small datasets (<= {pandas_threshold:,} rows). "
+                    f"Current: {row_count:,} rows."
+                )
+        elif row_count <= polars_threshold:
+            if POLARS_AVAILABLE:
+                return (
+                    f"Use POLARS for medium datasets ({pandas_threshold:,}-{polars_threshold:,} rows). "
+                    f"Current: {row_count:,} rows. Polars provides 5-10x speedup over Pandas."
+                )
+            else:
+                return (
+                    f"Use PANDAS for medium datasets, but consider installing Polars for better performance. "
+                    f"Current: {row_count:,} rows."
+                )
         else:
             return (
-                f"Use SPARK for datasets > {threshold:,} rows. "
-                f"Current: {row_count:,} rows."
+                f"Use SPARK for large datasets (> {polars_threshold:,} rows). "
+                f"Current: {row_count:,} rows. Distributed processing recommended."
             )
+
+    def run_full_benchmark_suite(
+        self,
+        row_counts: List[int] = None,
+        columns: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Run a comprehensive benchmark suite across multiple data sizes.
+
+        Args:
+            row_counts: List of row counts to benchmark.
+            columns: Number of columns in test data.
+
+        Returns:
+            Complete benchmark results across all sizes and backends.
+        """
+        if row_counts is None:
+            row_counts = [1000, 10000, 50000, 100000]
+
+        all_results = {
+            "benchmarks": [],
+            "summary": {
+                "row_counts_tested": row_counts,
+                "backends_available": {
+                    "spark": self.spark is not None,
+                    "pandas": PANDAS_AVAILABLE,
+                    "polars": POLARS_AVAILABLE
+                }
+            }
+        }
+
+        for row_count in row_counts:
+            logger.info(f"Benchmarking with {row_count:,} rows...")
+
+            # Create test data
+            test_data = [
+                [f"value_{r}_{c}" for c in range(columns)]
+                for r in range(row_count)
+            ]
+            col_names = [f"col_{i}" for i in range(columns)]
+
+            spark_df = None
+            pandas_df = None
+            polars_df = None
+
+            if self.spark:
+                spark_df = self.spark.createDataFrame(test_data, col_names)
+
+            if PANDAS_AVAILABLE:
+                pandas_df = pd.DataFrame(test_data, columns=col_names)
+
+            if POLARS_AVAILABLE:
+                polars_df = pl.DataFrame(dict(zip(col_names, zip(*test_data))))
+
+            # Run benchmark
+            bench_results = self.run_anonymization_benchmark(
+                spark_df=spark_df,
+                pandas_df=pandas_df,
+                polars_df=polars_df,
+                columns_to_mask=col_names[:2]
+            )
+
+            all_results["benchmarks"].append({
+                "row_count": row_count,
+                "results": bench_results
+            })
+
+            # Clear results for next iteration
+            self.results = []
+
+        return all_results
 
     def get_results_dataframe(self) -> pd.DataFrame:
         """
@@ -2164,19 +2845,71 @@ class Benchmark:
 
         return pd.DataFrame([asdict(r) for r in self.results])
 
+    def get_results_polars(self) -> pl.DataFrame:
+        """
+        Get benchmark results as a Polars DataFrame.
+
+        Returns:
+            Polars DataFrame with all benchmark results.
+        """
+        if not POLARS_AVAILABLE:
+            raise ImportError("Polars required for results DataFrame")
+
+        return pl.DataFrame([asdict(r) for r in self.results])
+
     def print_results(self) -> None:
         """Print formatted benchmark results."""
         print("\n" + "=" * 70)
         print("BENCHMARK RESULTS")
         print("=" * 70)
 
+        # Group by operation
+        operations = {}
         for result in self.results:
-            print(
-                f"\n{result.operation} ({result.backend}):\n"
-                f"  Rows: {result.row_count:,}\n"
-                f"  Time: {result.execution_time_seconds:.4f}s\n"
-                f"  Throughput: {result.throughput_rows_per_second:,.0f} rows/s"
-            )
+            if result.operation not in operations:
+                operations[result.operation] = {}
+            operations[result.operation][result.backend] = result
+
+        for op_name, backends in operations.items():
+            print(f"\n{op_name}:")
+            print("-" * 50)
+
+            times = []
+            for backend, result in sorted(backends.items()):
+                times.append((backend, result.execution_time_seconds))
+                print(
+                    f"  {backend:8s}: {result.execution_time_seconds:.4f}s "
+                    f"({result.throughput_rows_per_second:,.0f} rows/s)"
+                )
+
+            # Show speedup
+            if len(times) > 1:
+                fastest = min(times, key=lambda x: x[1])
+                for backend, t in times:
+                    if backend != fastest[0]:
+                        speedup = t / fastest[1]
+                        print(f"    -> {fastest[0]} is {speedup:.1f}x faster than {backend}")
+
+    def export_results(self, path: str, format: str = "json") -> None:
+        """
+        Export benchmark results to file.
+
+        Args:
+            path: Output file path.
+            format: Export format ('json', 'csv').
+        """
+        if format == "json":
+            with open(path, 'w') as f:
+                json.dump([asdict(r) for r in self.results], f, indent=2)
+        elif format == "csv":
+            if PANDAS_AVAILABLE:
+                self.get_results_dataframe().to_csv(path, index=False)
+            elif POLARS_AVAILABLE:
+                self.get_results_polars().write_csv(path)
+            else:
+                raise ImportError("Pandas or Polars required for CSV export")
+        else:
+            raise ValueError(f"Unknown format: {format}")
 
 
 # ==============================================================================
@@ -3002,6 +3735,11 @@ class AnonymizationManager:
 class BackendSelector:
     """
     Automatically selects the optimal processing backend based on data size.
+
+    Backend Selection Strategy:
+    - PANDAS: For small datasets (<50k rows) - minimal overhead
+    - POLARS: For medium datasets (50k-500k rows) - best single-machine performance
+    - SPARK: For large datasets (>500k rows) - distributed processing
     """
 
     def __init__(
@@ -3018,14 +3756,20 @@ class BackendSelector:
         """
         self.spark = spark
         self.config = config or ConfigManager()
-        self.threshold = self.config.get(
-            "processing", "pandas_threshold_rows", default=100000
+        self.pandas_threshold = self.config.get(
+            "processing", "pandas_threshold_rows", default=50000
         )
+        self.polars_threshold = self.config.get(
+            "processing", "polars_threshold_rows", default=500000
+        )
+        # Legacy support
+        self.threshold = self.pandas_threshold
 
     def get_backend(
         self,
         row_count: int,
-        force_backend: Optional[ProcessingBackend] = None
+        force_backend: Optional[ProcessingBackend] = None,
+        prefer_polars: bool = True
     ) -> ProcessingBackend:
         """
         Determine the optimal backend based on data size.
@@ -3033,6 +3777,7 @@ class BackendSelector:
         Args:
             row_count: Number of rows in the dataset.
             force_backend: Force a specific backend.
+            prefer_polars: If True, prefer Polars over Pandas when available.
 
         Returns:
             Recommended ProcessingBackend.
@@ -3040,10 +3785,50 @@ class BackendSelector:
         if force_backend and force_backend != ProcessingBackend.AUTO:
             return force_backend
 
-        if row_count <= self.threshold and PANDAS_AVAILABLE:
-            return ProcessingBackend.PANDAS
+        # Tiered backend selection
+        if row_count <= self.pandas_threshold:
+            # Small data: prefer Polars if available, else Pandas
+            if prefer_polars and POLARS_AVAILABLE:
+                return ProcessingBackend.POLARS
+            elif PANDAS_AVAILABLE:
+                return ProcessingBackend.PANDAS
+            else:
+                return ProcessingBackend.SPARK
+        elif row_count <= self.polars_threshold:
+            # Medium data: Polars is ideal
+            if POLARS_AVAILABLE:
+                return ProcessingBackend.POLARS
+            elif PANDAS_AVAILABLE:
+                return ProcessingBackend.PANDAS
+            else:
+                return ProcessingBackend.SPARK
         else:
+            # Large data: use Spark for distributed processing
             return ProcessingBackend.SPARK
+
+    def get_processor(
+        self,
+        row_count: int,
+        force_backend: Optional[ProcessingBackend] = None
+    ) -> Union['PandasProcessor', 'PolarsProcessor', None]:
+        """
+        Get the appropriate processor instance based on data size.
+
+        Args:
+            row_count: Number of rows in the dataset.
+            force_backend: Force a specific backend.
+
+        Returns:
+            Processor instance or None if Spark should be used.
+        """
+        backend = self.get_backend(row_count, force_backend)
+
+        if backend == ProcessingBackend.POLARS:
+            return PolarsProcessor(self.config)
+        elif backend == ProcessingBackend.PANDAS:
+            return PandasProcessor(self.config)
+        else:
+            return None  # Use Spark-based managers
 
     def convert_spark_to_pandas(self, df: DataFrame) -> pd.DataFrame:
         """
@@ -3082,6 +3867,121 @@ class BackendSelector:
             return self.spark.createDataFrame(df, schema)
         else:
             return self.spark.createDataFrame(df)
+
+    def convert_spark_to_polars(self, df: DataFrame) -> pl.DataFrame:
+        """
+        Convert Spark DataFrame to Polars via Arrow.
+
+        Args:
+            df: Spark DataFrame.
+
+        Returns:
+            Polars DataFrame.
+        """
+        if not POLARS_AVAILABLE:
+            raise ImportError("Polars is not available")
+
+        # Convert via Pandas (uses Arrow under the hood)
+        pandas_df = df.toPandas()
+        return pl.from_pandas(pandas_df)
+
+    def convert_polars_to_spark(
+        self,
+        df: pl.DataFrame,
+        schema: Optional[StructType] = None
+    ) -> DataFrame:
+        """
+        Convert Polars DataFrame to Spark.
+
+        Args:
+            df: Polars DataFrame.
+            schema: Optional Spark schema.
+
+        Returns:
+            Spark DataFrame.
+        """
+        if self.spark is None:
+            raise ValueError("SparkSession not initialized")
+
+        pandas_df = df.to_pandas()
+        if schema:
+            return self.spark.createDataFrame(pandas_df, schema)
+        else:
+            return self.spark.createDataFrame(pandas_df)
+
+    def convert_pandas_to_polars(self, df: pd.DataFrame) -> pl.DataFrame:
+        """
+        Convert Pandas DataFrame to Polars.
+
+        Args:
+            df: Pandas DataFrame.
+
+        Returns:
+            Polars DataFrame.
+        """
+        if not POLARS_AVAILABLE:
+            raise ImportError("Polars is not available")
+
+        return pl.from_pandas(df)
+
+    def convert_polars_to_pandas(self, df: pl.DataFrame) -> pd.DataFrame:
+        """
+        Convert Polars DataFrame to Pandas.
+
+        Args:
+            df: Polars DataFrame.
+
+        Returns:
+            Pandas DataFrame.
+        """
+        if not PANDAS_AVAILABLE:
+            raise ImportError("Pandas is not available")
+
+        return df.to_pandas()
+
+    def get_recommendation(self, row_count: int) -> Dict[str, Any]:
+        """
+        Get detailed backend recommendation with reasoning.
+
+        Args:
+            row_count: Number of rows in the dataset.
+
+        Returns:
+            Dictionary with recommendation details.
+        """
+        backend = self.get_backend(row_count)
+
+        recommendations = {
+            ProcessingBackend.PANDAS: {
+                "backend": "pandas",
+                "reason": f"Small dataset ({row_count:,} rows <= {self.pandas_threshold:,}). "
+                          "Pandas is sufficient with minimal overhead.",
+                "alternative": "polars" if POLARS_AVAILABLE else "spark"
+            },
+            ProcessingBackend.POLARS: {
+                "backend": "polars",
+                "reason": f"Medium dataset ({row_count:,} rows). "
+                          "Polars provides 5-10x speedup over Pandas with parallel processing.",
+                "alternative": "spark" if row_count > 100000 else "pandas"
+            },
+            ProcessingBackend.SPARK: {
+                "backend": "spark",
+                "reason": f"Large dataset ({row_count:,} rows > {self.polars_threshold:,}). "
+                          "Spark distributed processing is recommended.",
+                "alternative": "polars" if POLARS_AVAILABLE else "pandas"
+            }
+        }
+
+        return {
+            "row_count": row_count,
+            "recommended_backend": backend.value,
+            **recommendations.get(backend, {}),
+            "available_backends": {
+                "pandas": PANDAS_AVAILABLE,
+                "polars": POLARS_AVAILABLE,
+                "spark": True
+            }
+        }
 
 
 # ==============================================================================

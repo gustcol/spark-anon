@@ -55,6 +55,17 @@ try:
 except ImportError:
     pass
 
+# Check if polars is available
+POLARS_AVAILABLE = False
+pl = None
+
+try:
+    import polars as pl
+    POLARS_AVAILABLE = True
+    from spart import PolarsProcessor
+except ImportError:
+    pass
+
 # Check if yaml is available
 try:
     import yaml
@@ -660,6 +671,170 @@ def test_pandas_processor(runner, spark, df):
     runner.run_test("differential privacy", test_differential_privacy)
 
 
+def test_polars_processor(runner, spark, df):
+    """Test PolarsProcessor functionality."""
+    if not POLARS_AVAILABLE:
+        print("\n" + "=" * 60)
+        print("TEST: PolarsProcessor (SKIPPED - polars not installed)")
+        print("=" * 60)
+        return
+
+    print("\n" + "=" * 60)
+    print("TEST: PolarsProcessor")
+    print("=" * 60)
+
+    # Create test data directly in Polars (avoiding Pandas conversion issues)
+    polars_df = pl.DataFrame({
+        "user_id": ["USR101", "USR102", "USR103", "USR104", "USR105"],
+        "name": ["John Smith", "Jane Doe", "Peter Jones", "Mary Wilson", "Bob Brown"],
+        "email": ["john.smith@example.com", "jane.doe@example.com", "peter.jones@sample.net",
+                  "mary.wilson@test.org", "bob.brown@mail.com"],
+        "address": ["123 Main St", "456 Oak Ave", "789 Pine Rd", "321 Elm St", "654 Maple Dr"],
+        "salary": [50000.0, 75000.0, 62000.0, 55000.0, 68000.0],
+        "age": [30, 35, 28, 42, 38]
+    })
+
+    def test_apply_tags():
+        proc = PolarsProcessor()
+        tags = {
+            "name": {"gdpr_category": "PII", "sensitivity": "HIGH"},
+            "email": {"gdpr_category": "PII", "sensitivity": "MEDIUM"}
+        }
+        proc.apply_column_tags(polars_df, tags)
+        retrieved = proc.get_column_tags()
+        assert "name" in retrieved
+        assert retrieved["name"]["gdpr_category"] == "PII"
+
+    def test_mask_hash():
+        proc = PolarsProcessor()
+        result = proc.mask_columns(polars_df.clone(), {"email": "hash"})
+
+        # Hash should be 64 chars (SHA-256)
+        first_email = result.select("email").row(0)[0]
+        assert len(first_email) == 64
+
+    def test_mask_partial():
+        proc = PolarsProcessor()
+        result = proc.mask_columns(polars_df.clone(), {"email": "partial"})
+
+        # Should contain ***
+        first_email = result.select("email").row(0)[0]
+        assert "***" in first_email
+
+    def test_mask_redact():
+        proc = PolarsProcessor()
+        result = proc.mask_columns(polars_df.clone(), {"address": "redact"})
+
+        first_address = result.select("address").row(0)[0]
+        assert first_address == "[REDACTED]"
+
+    def test_pseudonymize():
+        proc = PolarsProcessor()
+        result1 = proc.pseudonymize_columns(polars_df.clone(), ["user_id"], "salt1")
+        result2 = proc.pseudonymize_columns(polars_df.clone(), ["user_id"], "salt1")
+
+        # Same salt should produce same results
+        id1 = result1.select("user_id").row(0)[0]
+        id2 = result2.select("user_id").row(0)[0]
+        assert id1 == id2
+
+    def test_auto_anonymize():
+        proc = PolarsProcessor()
+        tags = {
+            "name": {"gdpr_category": "PII", "sensitivity": "HIGH"},
+            "email": {"gdpr_category": "PII", "sensitivity": "MEDIUM"},
+            "salary": {"gdpr_category": "SPI", "sensitivity": "VERY_HIGH"}
+        }
+        proc.apply_column_tags(polars_df, tags)
+        result = proc.auto_anonymize(polars_df.clone())
+
+        # HIGH PII should be hashed
+        first_name = result.select("name").row(0)[0]
+        assert len(first_name) == 64
+
+        # MEDIUM PII should be partial
+        first_email = result.select("email").row(0)[0]
+        assert "***" in first_email
+
+        # SPI should be pseudonymized
+        first_salary = result.select("salary").row(0)[0]
+        assert len(str(first_salary)) == 64
+
+    def test_erasure():
+        proc = PolarsProcessor()
+        tags = {
+            "name": {"gdpr_category": "PII", "sensitivity": "HIGH"},
+            "email": {"gdpr_category": "PII", "sensitivity": "MEDIUM"}
+        }
+        proc.apply_column_tags(polars_df, tags)
+        result = proc.request_erasure(polars_df.clone(), "user_id", "USR101")
+
+        # USR101's PII should be None
+        usr101_row = result.filter(pl.col("user_id") == "USR101").row(0, named=True)
+        assert usr101_row["name"] is None
+        assert usr101_row["email"] is None
+
+        # Other users should be unchanged
+        usr102_row = result.filter(pl.col("user_id") == "USR102").row(0, named=True)
+        assert usr102_row["name"] == "Jane Doe"
+
+    def test_k_anonymize():
+        proc = PolarsProcessor()
+        result = proc.k_anonymize(polars_df.clone(), ["address"], k=2)
+
+        # Groups with fewer than k members should be suppressed
+        assert len(result) <= len(polars_df)
+
+    def test_check_k_anonymity():
+        proc = PolarsProcessor()
+        result = proc.check_k_anonymity(polars_df, ["address"], k=2)
+
+        assert "is_k_anonymous" in result
+        assert "min_group_size" in result
+        assert "compliance_rate" in result
+
+    def test_differential_privacy():
+        proc = PolarsProcessor()
+        result = proc.add_differential_privacy_noise(
+            polars_df.clone(), ["salary"], epsilon=1.0
+        )
+
+        # Values should be different
+        original_salaries = polars_df.select("salary").to_series().to_list()
+        noisy_salaries = result.select("salary").to_series().to_list()
+        assert original_salaries != noisy_salaries
+
+    def test_conversion_from_pandas():
+        if not PANDAS_AVAILABLE:
+            return  # Skip if Pandas not available
+        pandas_test = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+        polars_result = PolarsProcessor.from_pandas(pandas_test)
+        assert len(polars_result) == 3
+        assert list(polars_result.columns) == ["a", "b"]
+
+    def test_conversion_to_pandas():
+        if not PANDAS_AVAILABLE:
+            return  # Skip if Pandas not available
+        polars_test = pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+        pandas_result = PolarsProcessor.to_pandas(polars_test)
+        assert len(pandas_result) == 3
+        assert list(pandas_result.columns) == ["a", "b"]
+
+    runner.run_test("apply tags", test_apply_tags)
+    runner.run_test("hash masking", test_mask_hash)
+    runner.run_test("partial masking", test_mask_partial)
+    runner.run_test("redact masking", test_mask_redact)
+    runner.run_test("pseudonymization", test_pseudonymize)
+    runner.run_test("auto anonymize", test_auto_anonymize)
+    runner.run_test("erasure request", test_erasure)
+    runner.run_test("k-anonymity", test_k_anonymize)
+    runner.run_test("check k-anonymity", test_check_k_anonymity)
+    runner.run_test("differential privacy", test_differential_privacy)
+    if PANDAS_AVAILABLE:
+        runner.run_test("conversion from pandas", test_conversion_from_pandas)
+        runner.run_test("conversion to pandas", test_conversion_to_pandas)
+
+
 def test_benchmark(runner, spark):
     """Test Benchmark functionality."""
     print("\n" + "=" * 60)
@@ -669,10 +844,20 @@ def test_benchmark(runner, spark):
     def test_recommendation():
         benchmark = Benchmark(spark)
         small_rec = benchmark._get_recommendation(1000)
-        assert "PANDAS" in small_rec.upper()
+        # Should recommend Polars if available, otherwise Pandas
+        assert "POLARS" in small_rec.upper() or "PANDAS" in small_rec.upper()
 
         large_rec = benchmark._get_recommendation(1000000)
         assert "SPARK" in large_rec.upper()
+
+    def test_recommendation_medium():
+        benchmark = Benchmark(spark)
+        medium_rec = benchmark._get_recommendation(100000)
+        # Medium datasets should recommend Polars if available
+        if POLARS_AVAILABLE:
+            assert "POLARS" in medium_rec.upper()
+        else:
+            assert "PANDAS" in medium_rec.upper() or "SPARK" in medium_rec.upper()
 
     def test_benchmark_operation():
         benchmark = Benchmark(spark)
@@ -698,6 +883,7 @@ def test_benchmark(runner, spark):
         assert len(benchmark.results) >= 2
 
     runner.run_test("backend recommendation", test_recommendation)
+    runner.run_test("medium data recommendation", test_recommendation_medium)
     runner.run_test("benchmark operation", test_benchmark_operation)
     runner.run_test("results tracking", test_results_tracking)
 
@@ -711,8 +897,22 @@ def test_backend_selector(runner, spark, df):
     def test_auto_selection_small():
         selector = BackendSelector(spark)
         backend = selector.get_backend(1000)
-        if PANDAS_AVAILABLE:
+        # Small data: prefers Polars if available, else Pandas
+        if POLARS_AVAILABLE:
+            assert backend == ProcessingBackend.POLARS
+        elif PANDAS_AVAILABLE:
             assert backend == ProcessingBackend.PANDAS
+
+    def test_auto_selection_medium():
+        selector = BackendSelector(spark)
+        backend = selector.get_backend(100000)
+        # Medium data: Polars is ideal
+        if POLARS_AVAILABLE:
+            assert backend == ProcessingBackend.POLARS
+        elif PANDAS_AVAILABLE:
+            assert backend == ProcessingBackend.PANDAS
+        else:
+            assert backend == ProcessingBackend.SPARK
 
     def test_auto_selection_large():
         selector = BackendSelector(spark)
@@ -723,6 +923,33 @@ def test_backend_selector(runner, spark, df):
         selector = BackendSelector(spark)
         backend = selector.get_backend(1000, force_backend=ProcessingBackend.SPARK)
         assert backend == ProcessingBackend.SPARK
+
+    def test_force_polars():
+        if not POLARS_AVAILABLE:
+            return
+        selector = BackendSelector(spark)
+        backend = selector.get_backend(1000000, force_backend=ProcessingBackend.POLARS)
+        assert backend == ProcessingBackend.POLARS
+
+    def test_get_processor():
+        selector = BackendSelector(spark)
+        # Small data should return Polars or Pandas processor
+        proc = selector.get_processor(1000)
+        if POLARS_AVAILABLE:
+            assert isinstance(proc, PolarsProcessor)
+        elif PANDAS_AVAILABLE:
+            assert isinstance(proc, PandasProcessor)
+
+        # Large data should return None (use Spark)
+        proc_large = selector.get_processor(1000000)
+        assert proc_large is None
+
+    def test_get_recommendation():
+        selector = BackendSelector(spark)
+        rec = selector.get_recommendation(100000)
+        assert "row_count" in rec
+        assert "recommended_backend" in rec
+        assert "available_backends" in rec
 
     def test_conversion():
         if not PANDAS_VERSION_OK:
@@ -739,11 +966,42 @@ def test_backend_selector(runner, spark, df):
         spark_df = selector.convert_pandas_to_spark(pandas_df)
         assert spark_df.count() == len(pandas_df)
 
+    def test_polars_conversion():
+        if not POLARS_AVAILABLE or not PANDAS_VERSION_OK:
+            return
+
+        selector = BackendSelector(spark)
+
+        # Spark to Polars
+        polars_df = selector.convert_spark_to_polars(df)
+        assert isinstance(polars_df, pl.DataFrame)
+        assert len(polars_df) == df.count()
+
+        # Polars to Spark
+        spark_df = selector.convert_polars_to_spark(polars_df)
+        assert spark_df.count() == len(polars_df)
+
+        # Pandas to Polars
+        pandas_df = df.toPandas()
+        polars_from_pandas = selector.convert_pandas_to_polars(pandas_df)
+        assert len(polars_from_pandas) == len(pandas_df)
+
+        # Polars to Pandas
+        pandas_from_polars = selector.convert_polars_to_pandas(polars_from_pandas)
+        assert len(pandas_from_polars) == len(polars_from_pandas)
+
     runner.run_test("auto selection (small data)", test_auto_selection_small)
+    runner.run_test("auto selection (medium data)", test_auto_selection_medium)
     runner.run_test("auto selection (large data)", test_auto_selection_large)
     runner.run_test("force backend", test_force_backend)
+    if POLARS_AVAILABLE:
+        runner.run_test("force polars backend", test_force_polars)
+    runner.run_test("get processor", test_get_processor)
+    runner.run_test("get recommendation", test_get_recommendation)
     if PANDAS_VERSION_OK:
         runner.run_test("conversion between backends", test_conversion)
+    if POLARS_AVAILABLE and PANDAS_VERSION_OK:
+        runner.run_test("polars conversions", test_polars_conversion)
 
 
 def test_databricks_methods(runner, spark):
@@ -1991,6 +2249,7 @@ def run_all_tests():
         test_pii_detector(runner, spark, df)
         test_advanced_anonymization(runner, spark, df)
         test_pandas_processor(runner, spark, df)
+        test_polars_processor(runner, spark, df)
         test_benchmark(runner, spark)
         test_backend_selector(runner, spark, df)
         test_databricks_methods(runner, spark)
