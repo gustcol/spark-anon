@@ -54,41 +54,29 @@ from functools import wraps
 from pathlib import Path
 
 # Optional imports for extended functionality
-# Type hints for optional modules
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import pandas as pd
-    import numpy as np
-    import yaml
-    import polars as pl
-
 PANDAS_AVAILABLE = False
 YAML_AVAILABLE = False
 POLARS_AVAILABLE = False
-pd: Any = None
-np: Any = None
-yaml: Any = None
-pl: Any = None
 
 try:
-    import pandas as pd  # type: ignore[no-redef]
-    import numpy as np  # type: ignore[no-redef]
+    import pandas as pd  # type: ignore[import-unresolved]
+    import numpy as np  # type: ignore[import-unresolved]
     PANDAS_AVAILABLE = True
 except ImportError:
-    pass
+    pd = None  # type: ignore[assignment]
+    np = None  # type: ignore[assignment]
 
 try:
-    import yaml  # type: ignore[no-redef]
+    import yaml  # type: ignore[import-unresolved]
     YAML_AVAILABLE = True
 except ImportError:
-    pass
+    yaml = None  # type: ignore[assignment]
 
 try:
-    import polars as pl  # type: ignore[no-redef]
+    import polars as pl  # type: ignore[import-unresolved]
     POLARS_AVAILABLE = True
 except ImportError:
-    pass
+    pl = None  # type: ignore[assignment]
 
 # Basic logging configuration
 logging.basicConfig(
@@ -321,7 +309,7 @@ class ConfigManager:
         import copy
         self.config = copy.deepcopy(self.DEFAULT_CONFIG)
 
-    def load_from_file(self, path: str) -> None:
+    def load_from_file(self, path: Union[str, Path]) -> None:
         """
         Load configuration from a YAML file.
 
@@ -338,16 +326,16 @@ class ConfigManager:
                 "Install it with: pip install pyyaml"
             )
 
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"Configuration file not found: {path}")
+        file_path = Path(path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"Configuration file not found: {file_path}")
 
-        with open(path, 'r') as f:
+        with open(file_path, 'r') as f:
             file_config = yaml.safe_load(f)
 
         if file_config:
             self._merge_config(file_config)
-            logger.info(f"Configuration loaded from {path}")
+            logger.info(f"Configuration loaded from {file_path}")
 
     def _merge_config(self, new_config: Dict[str, Any]) -> None:
         """Recursively merge new configuration into existing."""
@@ -421,11 +409,15 @@ class ConfigManager:
         keys = keys_and_value[:-1]
         value = keys_and_value[-1]
 
-        current = self.config
+        current: Dict[str, Any] = self.config
         for key in keys[:-1]:
             if key not in current:
                 current[key] = {}
-            current = current[key]
+            next_val = current[key]
+            if isinstance(next_val, dict):
+                current = next_val
+            else:
+                break
 
         current[keys[-1]] = value
 
@@ -1901,7 +1893,8 @@ class PandasProcessor:
             K-anonymized DataFrame.
         """
         # Count occurrences of each QI combination
-        counts = df.groupby(quasi_identifiers).size().reset_index(name='_count')
+        counts = df.groupby(quasi_identifiers).size().reset_index()
+        counts.columns = list(counts.columns[:-1]) + ['_count']
 
         # Filter valid groups
         valid = counts[counts['_count'] >= k].drop(columns=['_count'])
@@ -2285,12 +2278,10 @@ class PolarsProcessor:
         Returns:
             DataFrame with generalized column.
         """
+        lower = ((pl.col(column) / bin_size).floor() * bin_size).cast(pl.Int64).cast(pl.Utf8)
+        upper = (((pl.col(column) / bin_size).floor() + 1) * bin_size).cast(pl.Int64).cast(pl.Utf8)
         return df.with_columns(
-            ((pl.col(column) / bin_size).floor() * bin_size).cast(pl.Int64).cast(pl.Utf8)
-            .str.concat_horizontal(
-                pl.lit("-"),
-                (((pl.col(column) / bin_size).floor() + 1) * bin_size).cast(pl.Int64).cast(pl.Utf8)
-            ).alias(column)
+            pl.concat_str([lower, pl.lit("-"), upper]).alias(column)
         )
 
     def generalize_date(
@@ -2704,7 +2695,7 @@ class Benchmark:
         if polars_total > 0:
             times["polars"] = polars_total
 
-        fastest = min(times, key=times.get) if times else "spark"
+        fastest = min(times, key=lambda k: times[k]) if times else "spark"
 
         results["summary"] = {
             "row_count": row_count,
@@ -2764,7 +2755,7 @@ class Benchmark:
 
     def run_full_benchmark_suite(
         self,
-        row_counts: List[int] = None,
+        row_counts: Optional[List[int]] = None,
         columns: int = 10
     ) -> Dict[str, Any]:
         """
@@ -3070,7 +3061,7 @@ class MetadataManager:
         # Check if we are in a Databricks environment
         spark_version_tag = "spark.databricks.clusterUsageTags.sparkVersion"
         is_databricks = self.spark.conf.get(spark_version_tag, "")
-        self.is_databricks = len(is_databricks) > 0
+        self.is_databricks = bool(is_databricks)
 
     def apply_column_tags(
         self,

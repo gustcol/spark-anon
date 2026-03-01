@@ -1,0 +1,94 @@
+[project]
+name = "spark-anon"
+version = "1.0.0"
+description = "Spark GDPR & Privacy Library for managing metadata, tags, and compliance in data pipelines"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Gustavo C Lima"},
+]
+keywords = ["spark", "gdpr", "privacy", "anonymization", "pii", "polars", "pandas"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Security",
+]
+
+dependencies = [
+    "pyspark>=4.0.0",
+]
+
+[project.optional-dependencies]
+polars = [
+    "polars>=1.0.0",
+    "pyarrow>=15.0.0",
+]
+pandas = [
+    "pandas>=2.2.0",
+    "numpy>=1.24.0",
+    "pyarrow>=15.0.0",
+]
+yaml = [
+    "pyyaml>=6.0",
+]
+atlas = [
+    "requests>=2.28.0",
+]
+aws = [
+    "boto3>=1.26.0",
+]
+ml = [
+    "spacy>=3.5.0",
+    "transformers>=4.30.0",
+]
+all = [
+    "spark-anon[polars,pandas,yaml,atlas,aws,ml]",
+]
+dev = [
+    "ty>=0.0.19",
+    "ruff>=0.9.0",
+    "pre-commit>=4.0.0",
+    "pyarrow>=15.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/gustcol/spark-anon"
+Repository = "https://github.com/gustcol/spark-anon"
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.setuptools]
+py-modules = ["spart"]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.rules]
+# Suppress false positives from optional imports and external lib stubs
+invalid-argument-type = "warn"
+call-non-callable = "warn"
+unresolved-import = "warn"
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+ignore = [
+    "E501",    # line too long - handled by formatter
+    "B905",    # zip without strict
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["spart"]
