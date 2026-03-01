@@ -62,7 +62,7 @@ This section provides detailed instructions for downloading **spark-anon** from 
 
 Before downloading, ensure you have:
 
-- **Python 3.9+** installed
+- **Python 3.10+** installed
 - **Git** (for clone method) or **curl/wget** (for direct download)
 - **PySpark 4.0+** installed in your environment
 
@@ -401,15 +401,15 @@ classDiagram
 
 **Required:**
 ```
-Python >= 3.9
-PySpark >= 4.0.0
-Apache Spark >= 4.0.0
+Python >= 3.10
+PySpark >= 4.0
+Apache Spark >= 4.0
 ```
 
 **Optional (for enhanced features):**
 ```
-polars >= 1.0.0        # For PolarsProcessor backend (RECOMMENDED - 5-10x faster than Pandas)
-pyarrow >= 15.0.0      # Required for Polars/Pandas interop
+polars >= 1.0          # For PolarsProcessor backend (RECOMMENDED - 5-10x faster than Pandas)
+pyarrow >= 19.0        # Required for Polars/Pandas interop
 pandas >= 2.2.0        # For PandasProcessor backend
 numpy >= 1.24.0        # For differential privacy
 PyYAML >= 6.0          # For YAML configuration
@@ -444,6 +444,7 @@ After downloading from https://github.com/gustcol/spark-anon, you'll find the fo
 spark-anon/
 ├── spart.py                  # Main library - the core module you'll import
 ├── test_spart.py             # Comprehensive test suite (112 tests)
+├── conftest.py               # Pytest fixture definitions
 ├── pyproject.toml            # Project configuration, dependencies, and tooling
 ├── .pre-commit-config.yaml   # Pre-commit hooks (ruff, ty, standard checks)
 ├── README.md                 # This documentation file
@@ -456,6 +457,7 @@ spark-anon/
 |------|---------|------|
 | `spart.py` | Core library containing all GDPR compliance classes | ~200 KB |
 | `test_spart.py` | Comprehensive test suite (112 tests) - run with `python test_spart.py` | ~84 KB |
+| `conftest.py` | Pytest fixture definitions for the test suite | ~2 KB |
 | `pyproject.toml` | Project metadata, dependencies, ty/ruff configuration | ~2 KB |
 | `.pre-commit-config.yaml` | Pre-commit hooks for code quality | ~1 KB |
 | `README.md` | Complete documentation with examples and diagrams | ~75 KB |

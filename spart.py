@@ -32,26 +32,27 @@ Usage:
     )
 """
 
-from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    StructType, StructField, StringType, IntegerType,
-    TimestampType, BooleanType, ArrayType, MapType
-)
-from typing import Dict, List, Optional, Any, Union, Callable, Tuple
-import json
 import datetime
-import uuid
-import logging
 import hashlib
+import json
+import logging
 import os
 import re
 import time
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field, asdict
+import uuid
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 from enum import Enum
-from functools import wraps
 from pathlib import Path
+from typing import Any, Union
+
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StringType,
+    StructField,
+    StructType,
+)
 
 # Optional imports for extended functionality
 PANDAS_AVAILABLE = False
@@ -59,29 +60,31 @@ YAML_AVAILABLE = False
 POLARS_AVAILABLE = False
 
 try:
-    import pandas as pd  # type: ignore[import-unresolved]
-    import numpy as np  # type: ignore[import-unresolved]
+    import numpy as np
+    import pandas as pd
+
     PANDAS_AVAILABLE = True
 except ImportError:
     pd = None  # type: ignore[assignment]
     np = None  # type: ignore[assignment]
 
 try:
-    import yaml  # type: ignore[import-unresolved]
+    import yaml
+
     YAML_AVAILABLE = True
 except ImportError:
     yaml = None  # type: ignore[assignment]
 
 try:
-    import polars as pl  # type: ignore[import-unresolved]
+    import polars as pl
+
     POLARS_AVAILABLE = True
 except ImportError:
     pl = None  # type: ignore[assignment]
 
 # Basic logging configuration
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
 )
 logger = logging.getLogger("spart")
 
@@ -93,6 +96,7 @@ logger = logging.getLogger("spart")
 
 class GDPRCategory(Enum):
     """GDPR data categories."""
+
     PII = "Personally Identifiable Information"
     SPI = "Sensitive Personal Information"
     NPII = "Non-Personally Identifiable Information"
@@ -100,6 +104,7 @@ class GDPRCategory(Enum):
 
 class SensitivityLevel(Enum):
     """Data sensitivity levels."""
+
     LOW = 1
     MEDIUM = 2
     HIGH = 3
@@ -108,6 +113,7 @@ class SensitivityLevel(Enum):
 
 class ConsentStatus(Enum):
     """User consent status."""
+
     GRANTED = "granted"
     DENIED = "denied"
     WITHDRAWN = "withdrawn"
@@ -117,6 +123,7 @@ class ConsentStatus(Enum):
 
 class AuditEventType(Enum):
     """Types of audit events."""
+
     DATA_ACCESS = "data_access"
     DATA_MODIFICATION = "data_modification"
     DATA_DELETION = "data_deletion"
@@ -131,6 +138,7 @@ class AuditEventType(Enum):
 
 class ProcessingBackend(Enum):
     """Data processing backend selection."""
+
     SPARK = "spark"
     PANDAS = "pandas"
     POLARS = "polars"
@@ -140,76 +148,75 @@ class ProcessingBackend(Enum):
 @dataclass
 class ConsentRecord:
     """Represents a user consent record."""
+
     subject_id: str
     purpose: str
     status: ConsentStatus
-    granted_at: Optional[datetime.datetime] = None
-    expires_at: Optional[datetime.datetime] = None
-    withdrawn_at: Optional[datetime.datetime] = None
-    legal_basis: Optional[str] = None
-    data_categories: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    granted_at: datetime.datetime | None = None
+    expires_at: datetime.datetime | None = None
+    withdrawn_at: datetime.datetime | None = None
+    legal_basis: str | None = None
+    data_categories: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def is_valid(self) -> bool:
         """Check if consent is currently valid."""
         if self.status != ConsentStatus.GRANTED:
             return False
-        if self.expires_at and datetime.datetime.now() > self.expires_at:
-            return False
-        return True
+        return not (self.expires_at and datetime.datetime.now() > self.expires_at)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         result = asdict(self)
-        result['status'] = self.status.value
+        result["status"] = self.status.value
         if self.granted_at:
-            result['granted_at'] = self.granted_at.isoformat()
+            result["granted_at"] = self.granted_at.isoformat()
         if self.expires_at:
-            result['expires_at'] = self.expires_at.isoformat()
+            result["expires_at"] = self.expires_at.isoformat()
         if self.withdrawn_at:
-            result['withdrawn_at'] = self.withdrawn_at.isoformat()
+            result["withdrawn_at"] = self.withdrawn_at.isoformat()
         return result
 
 
 @dataclass
 class AuditEvent:
     """Represents an audit log event."""
+
     event_id: str
     event_type: AuditEventType
     timestamp: datetime.datetime
     actor: str
     action: str
     resource: str
-    details: Dict[str, Any] = field(default_factory=dict)
-    subject_ids: List[str] = field(default_factory=list)
+    details: dict[str, Any] = field(default_factory=dict)
+    subject_ids: list[str] = field(default_factory=list)
     success: bool = True
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         result = asdict(self)
-        result['event_type'] = self.event_type.value
-        result['timestamp'] = self.timestamp.isoformat()
+        result["event_type"] = self.event_type.value
+        result["timestamp"] = self.timestamp.isoformat()
         return result
 
 
 @dataclass
 class BenchmarkResult:
     """Results from a benchmark run."""
+
     operation: str
     backend: str
     row_count: int
     column_count: int
     execution_time_seconds: float
-    memory_usage_mb: Optional[float] = None
-    throughput_rows_per_second: Optional[float] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    memory_usage_mb: float | None = None
+    throughput_rows_per_second: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.row_count > 0 and self.execution_time_seconds > 0:
-            self.throughput_rows_per_second = (
-                self.row_count / self.execution_time_seconds
-            )
+            self.throughput_rows_per_second = self.row_count / self.execution_time_seconds
 
 
 # ==============================================================================
@@ -229,40 +236,39 @@ class ConfigManager:
         "metadata": {
             "column_name": "_metadata",
             "gdpr_categories": ["PII", "SPI", "NPII"],
-            "sensitivity_levels": ["LOW", "MEDIUM", "HIGH", "VERY_HIGH"]
+            "sensitivity_levels": ["LOW", "MEDIUM", "HIGH", "VERY_HIGH"],
         },
         "anonymization": {
             "default_hash_algorithm": "sha256",
             "partial_mask_pattern": "***",
             "redact_text": "[REDACTED]",
             "k_anonymity_default_k": 5,
-            "differential_privacy_epsilon": 1.0
+            "differential_privacy_epsilon": 1.0,
         },
-        "retention": {
-            "default_days": 365,
-            "max_days": 3650,
-            "grace_period_days": 30
-        },
+        "retention": {"default_days": 365, "max_days": 3650, "grace_period_days": 30},
         "consent": {
             "default_expiry_days": 365,
             "require_explicit_consent": True,
             "purposes": [
-                "marketing", "analytics", "service_delivery",
-                "legal_compliance", "research"
-            ]
+                "marketing",
+                "analytics",
+                "service_delivery",
+                "legal_compliance",
+                "research",
+            ],
         },
         "audit": {
             "enabled": True,
             "log_path": "./audit_logs",
             "retention_days": 2555,
             "include_data_samples": False,
-            "max_log_size_mb": 100
+            "max_log_size_mb": 100,
         },
         "processing": {
             "backend": "auto",
             "pandas_threshold_rows": 100000,
             "spark_partitions": "auto",
-            "cache_enabled": True
+            "cache_enabled": True,
         },
         "pii_detection": {
             "enabled": True,
@@ -271,25 +277,38 @@ class ConfigManager:
                 "phone": r"\+?[\d\s\-()]{10,}",
                 "ssn": r"\d{3}-\d{2}-\d{4}",
                 "credit_card": r"\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}",
-                "ip_address": r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+                "ip_address": r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}",
             },
             "column_name_patterns": {
                 "pii": [
-                    "name", "email", "phone", "ssn", "address",
-                    "birth", "zip", "customer", "user"
+                    "name",
+                    "email",
+                    "phone",
+                    "ssn",
+                    "address",
+                    "birth",
+                    "zip",
+                    "customer",
+                    "user",
                 ],
                 "spi": [
-                    "health", "religion", "politics", "racial", "ethnic",
-                    "genetic", "biometric", "sexual", "criminal", "salary"
+                    "health",
+                    "religion",
+                    "politics",
+                    "racial",
+                    "ethnic",
+                    "genetic",
+                    "biometric",
+                    "sexual",
+                    "criminal",
+                    "salary",
                 ],
-                "secure": [
-                    "password", "token", "secret", "key", "credential", "api_key"
-                ]
-            }
-        }
+                "secure": ["password", "token", "secret", "key", "credential", "api_key"],
+            },
+        },
     }
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: str | None = None):
         """
         Initialize configuration manager.
 
@@ -307,9 +326,10 @@ class ConfigManager:
     def _deep_copy_config(self):
         """Create a deep copy of the default config."""
         import copy
+
         self.config = copy.deepcopy(self.DEFAULT_CONFIG)
 
-    def load_from_file(self, path: Union[str, Path]) -> None:
+    def load_from_file(self, path: str | Path) -> None:
         """
         Load configuration from a YAML file.
 
@@ -322,24 +342,24 @@ class ConfigManager:
         """
         if not YAML_AVAILABLE:
             raise ImportError(
-                "PyYAML is required for YAML configuration. "
-                "Install it with: pip install pyyaml"
+                "PyYAML is required for YAML configuration. Install it with: pip install pyyaml"
             )
 
         file_path = Path(path)
         if not file_path.exists():
             raise FileNotFoundError(f"Configuration file not found: {file_path}")
 
-        with open(file_path, 'r') as f:
+        with open(file_path) as f:
             file_config = yaml.safe_load(f)
 
         if file_config:
             self._merge_config(file_config)
             logger.info(f"Configuration loaded from {file_path}")
 
-    def _merge_config(self, new_config: Dict[str, Any]) -> None:
+    def _merge_config(self, new_config: dict[str, Any]) -> None:
         """Recursively merge new configuration into existing."""
-        def merge(base: Dict, updates: Dict) -> Dict:
+
+        def merge(base: dict, updates: dict) -> dict:
             for key, value in updates.items():
                 if key in base and isinstance(base[key], dict) and isinstance(value, dict):
                     merge(base[key], value)
@@ -409,7 +429,7 @@ class ConfigManager:
         keys = keys_and_value[:-1]
         value = keys_and_value[-1]
 
-        current: Dict[str, Any] = self.config
+        current: dict[str, Any] = self.config
         for key in keys[:-1]:
             if key not in current:
                 current[key] = {}
@@ -430,15 +450,14 @@ class ConfigManager:
         """
         if not YAML_AVAILABLE:
             raise ImportError(
-                "PyYAML is required for YAML configuration. "
-                "Install it with: pip install pyyaml"
+                "PyYAML is required for YAML configuration. Install it with: pip install pyyaml"
             )
 
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             yaml.dump(self.config, f, default_flow_style=False, indent=2)
         logger.info(f"Configuration saved to {path}")
 
-    def validate(self) -> List[str]:
+    def validate(self) -> list[str]:
         """
         Validate the current configuration.
 
@@ -490,9 +509,9 @@ class AuditManager:
 
     def __init__(
         self,
-        config: Optional[ConfigManager] = None,
-        log_path: Optional[str] = None,
-        spark: Optional[SparkSession] = None
+        config: ConfigManager | None = None,
+        log_path: str | None = None,
+        spark: SparkSession | None = None,
     ):
         """
         Initialize the audit manager.
@@ -507,7 +526,7 @@ class AuditManager:
             log_path or self.config.get("audit", "log_path", default="./audit_logs")
         )
         self.spark = spark
-        self._events: List[AuditEvent] = []
+        self._events: list[AuditEvent] = []
         self._enabled = self.config.get("audit", "enabled", default=True)
 
         # Create log directory if it doesn't exist
@@ -520,11 +539,11 @@ class AuditManager:
         actor: str,
         action: str,
         resource: str,
-        details: Optional[Dict[str, Any]] = None,
-        subject_ids: Optional[List[str]] = None,
+        details: dict[str, Any] | None = None,
+        subject_ids: list[str] | None = None,
         success: bool = True,
-        error_message: Optional[str] = None
-    ) -> Optional[AuditEvent]:
+        error_message: str | None = None,
+    ) -> AuditEvent | None:
         """
         Log an audit event.
 
@@ -554,15 +573,13 @@ class AuditManager:
             details=details or {},
             subject_ids=subject_ids or [],
             success=success,
-            error_message=error_message
+            error_message=error_message,
         )
 
         self._events.append(event)
         self._persist_event(event)
 
-        logger.debug(
-            f"Audit event logged: {event_type.value} - {action} on {resource}"
-        )
+        logger.debug(f"Audit event logged: {event_type.value} - {action} on {resource}")
 
         return event
 
@@ -573,18 +590,18 @@ class AuditManager:
         log_file = self.log_path / f"audit_{date_str}.jsonl"
 
         # Append event as JSON line (immutable log pattern)
-        with open(log_file, 'a') as f:
+        with open(log_file, "a") as f:
             f.write(json.dumps(event.to_dict()) + "\n")
 
     def get_events(
         self,
-        event_type: Optional[AuditEventType] = None,
-        actor: Optional[str] = None,
-        resource: Optional[str] = None,
-        start_date: Optional[datetime.datetime] = None,
-        end_date: Optional[datetime.datetime] = None,
-        subject_id: Optional[str] = None
-    ) -> List[AuditEvent]:
+        event_type: AuditEventType | None = None,
+        actor: str | None = None,
+        resource: str | None = None,
+        start_date: datetime.datetime | None = None,
+        end_date: datetime.datetime | None = None,
+        subject_id: str | None = None,
+    ) -> list[AuditEvent]:
         """
         Query audit events with filters.
 
@@ -615,9 +632,9 @@ class AuditManager:
 
     def _load_events_from_storage(
         self,
-        start_date: Optional[datetime.datetime] = None,
-        end_date: Optional[datetime.datetime] = None
-    ) -> List[AuditEvent]:
+        start_date: datetime.datetime | None = None,
+        end_date: datetime.datetime | None = None,
+    ) -> list[AuditEvent]:
         """Load events from log files."""
         events = []
 
@@ -638,24 +655,22 @@ class AuditManager:
             if end_date and file_date.date() > end_date.date():
                 continue
 
-            with open(log_file, 'r') as f:
+            with open(log_file) as f:
                 for line in f:
                     if line.strip():
                         try:
                             data = json.loads(line)
                             event = AuditEvent(
-                                event_id=data['event_id'],
-                                event_type=AuditEventType(data['event_type']),
-                                timestamp=datetime.datetime.fromisoformat(
-                                    data['timestamp']
-                                ),
-                                actor=data['actor'],
-                                action=data['action'],
-                                resource=data['resource'],
-                                details=data.get('details', {}),
-                                subject_ids=data.get('subject_ids', []),
-                                success=data.get('success', True),
-                                error_message=data.get('error_message')
+                                event_id=data["event_id"],
+                                event_type=AuditEventType(data["event_type"]),
+                                timestamp=datetime.datetime.fromisoformat(data["timestamp"]),
+                                actor=data["actor"],
+                                action=data["action"],
+                                resource=data["resource"],
+                                details=data.get("details", {}),
+                                subject_ids=data.get("subject_ids", []),
+                                success=data.get("success", True),
+                                error_message=data.get("error_message"),
                             )
                             events.append(event)
                         except (json.JSONDecodeError, KeyError, ValueError) as e:
@@ -667,8 +682,8 @@ class AuditManager:
         self,
         start_date: datetime.datetime,
         end_date: datetime.datetime,
-        output_path: Optional[str] = None
-    ) -> Dict[str, Any]:
+        output_path: str | None = None,
+    ) -> dict[str, Any]:
         """
         Generate a GDPR compliance report for the specified period.
 
@@ -694,66 +709,55 @@ class AuditManager:
             all_subjects.update(event.subject_ids)
 
         # Erasure requests summary
-        erasure_events = [
-            e for e in events if e.event_type == AuditEventType.ERASURE_REQUEST
-        ]
+        erasure_events = [e for e in events if e.event_type == AuditEventType.ERASURE_REQUEST]
         erasure_completed = sum(1 for e in erasure_events if e.success)
         erasure_failed = len(erasure_events) - erasure_completed
 
         # Consent changes summary
-        consent_events = [
-            e for e in events if e.event_type == AuditEventType.CONSENT_CHANGE
-        ]
+        consent_events = [e for e in events if e.event_type == AuditEventType.CONSENT_CHANGE]
 
         report = {
             "report_id": str(uuid.uuid4()),
             "generated_at": datetime.datetime.now().isoformat(),
-            "period": {
-                "start": start_date.isoformat(),
-                "end": end_date.isoformat()
-            },
+            "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
             "summary": {
                 "total_events": len(events),
                 "unique_subjects_affected": len(all_subjects),
-                "events_by_type": event_counts
+                "events_by_type": event_counts,
             },
             "erasure_requests": {
                 "total": len(erasure_events),
                 "completed": erasure_completed,
                 "failed": erasure_failed,
                 "compliance_rate": (
-                    erasure_completed / len(erasure_events) * 100
-                    if erasure_events else 100
-                )
+                    erasure_completed / len(erasure_events) * 100 if erasure_events else 100
+                ),
             },
             "consent_management": {
                 "total_changes": len(consent_events),
                 "grants": sum(
-                    1 for e in consent_events
-                    if e.details.get("new_status") == "granted"
+                    1 for e in consent_events if e.details.get("new_status") == "granted"
                 ),
                 "withdrawals": sum(
-                    1 for e in consent_events
-                    if e.details.get("new_status") == "withdrawn"
-                )
+                    1 for e in consent_events if e.details.get("new_status") == "withdrawn"
+                ),
             },
             "data_access_summary": {
                 "total_accesses": event_counts.get("data_access", 0),
-                "unique_actors": len(set(
-                    e.actor for e in events
-                    if e.event_type == AuditEventType.DATA_ACCESS
-                ))
-            }
+                "unique_actors": len(
+                    set(e.actor for e in events if e.event_type == AuditEventType.DATA_ACCESS)
+                ),
+            },
         }
 
         if output_path:
-            with open(output_path, 'w') as f:
+            with open(output_path, "w") as f:
                 json.dump(report, f, indent=2)
             logger.info(f"Compliance report saved to {output_path}")
 
         return report
 
-    def get_subject_access_report(self, subject_id: str) -> Dict[str, Any]:
+    def get_subject_access_report(self, subject_id: str) -> dict[str, Any]:
         """
         Generate a data subject access report (DSAR).
 
@@ -775,7 +779,7 @@ class AuditManager:
             "processing_activities": [],
             "consent_history": [],
             "erasure_requests": [],
-            "data_modifications": []
+            "data_modifications": [],
         }
 
         for event in events:
@@ -783,7 +787,7 @@ class AuditManager:
                 "timestamp": event.timestamp.isoformat(),
                 "action": event.action,
                 "actor": event.actor,
-                "details": event.details
+                "details": event.details,
             }
 
             if event.event_type == AuditEventType.CONSENT_CHANGE:
@@ -814,9 +818,9 @@ class ConsentManager:
     def __init__(
         self,
         spark: SparkSession,
-        config: Optional[ConfigManager] = None,
-        audit_manager: Optional[AuditManager] = None,
-        storage_path: Optional[str] = None
+        config: ConfigManager | None = None,
+        audit_manager: AuditManager | None = None,
+        storage_path: str | None = None,
     ):
         """
         Initialize the consent manager.
@@ -834,12 +838,11 @@ class ConsentManager:
         self.storage_path.mkdir(parents=True, exist_ok=True)
 
         # In-memory consent cache
-        self._consent_cache: Dict[str, Dict[str, ConsentRecord]] = {}
+        self._consent_cache: dict[str, dict[str, ConsentRecord]] = {}
 
         # Valid purposes from config
         self.valid_purposes = self.config.get(
-            "consent", "purposes",
-            default=["marketing", "analytics", "service_delivery"]
+            "consent", "purposes", default=["marketing", "analytics", "service_delivery"]
         )
 
     def record_consent(
@@ -847,10 +850,10 @@ class ConsentManager:
         subject_id: str,
         purpose: str,
         status: ConsentStatus,
-        legal_basis: Optional[str] = None,
-        expiry_days: Optional[int] = None,
-        data_categories: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        legal_basis: str | None = None,
+        expiry_days: int | None = None,
+        data_categories: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> ConsentRecord:
         """
         Record a consent decision for a data subject.
@@ -873,16 +876,13 @@ class ConsentManager:
         # Validate purpose
         if purpose not in self.valid_purposes:
             raise ValueError(
-                f"Invalid purpose: {purpose}. "
-                f"Valid purposes are: {self.valid_purposes}"
+                f"Invalid purpose: {purpose}. Valid purposes are: {self.valid_purposes}"
             )
 
         # Calculate expiry
         expires_at = None
         if status == ConsentStatus.GRANTED:
-            exp_days = expiry_days or self.config.get(
-                "consent", "default_expiry_days", default=365
-            )
+            exp_days = expiry_days or self.config.get("consent", "default_expiry_days", default=365)
             expires_at = datetime.datetime.now() + datetime.timedelta(days=exp_days)
 
         record = ConsentRecord(
@@ -894,7 +894,7 @@ class ConsentManager:
             withdrawn_at=datetime.datetime.now() if status == ConsentStatus.WITHDRAWN else None,
             legal_basis=legal_basis,
             data_categories=data_categories or [],
-            metadata=metadata or {}
+            metadata=metadata or {},
         )
 
         # Store in cache
@@ -916,14 +916,13 @@ class ConsentManager:
                     "purpose": purpose,
                     "new_status": status.value,
                     "legal_basis": legal_basis,
-                    "expires_at": expires_at.isoformat() if expires_at else None
+                    "expires_at": expires_at.isoformat() if expires_at else None,
                 },
-                subject_ids=[subject_id]
+                subject_ids=[subject_id],
             )
 
         logger.info(
-            f"Consent recorded: subject={subject_id}, "
-            f"purpose={purpose}, status={status.value}"
+            f"Consent recorded: subject={subject_id}, purpose={purpose}, status={status.value}"
         )
 
         return record
@@ -935,21 +934,17 @@ class ConsentManager:
         # Load existing records
         records = {}
         if subject_file.exists():
-            with open(subject_file, 'r') as f:
+            with open(subject_file) as f:
                 records = json.load(f)
 
         # Update with new record
         records[record.purpose] = record.to_dict()
 
         # Save
-        with open(subject_file, 'w') as f:
+        with open(subject_file, "w") as f:
             json.dump(records, f, indent=2)
 
-    def check_consent(
-        self,
-        subject_id: str,
-        purpose: str
-    ) -> Tuple[bool, Optional[ConsentRecord]]:
+    def check_consent(self, subject_id: str, purpose: str) -> tuple[bool, ConsentRecord | None]:
         """
         Check if a data subject has valid consent for a purpose.
 
@@ -967,11 +962,7 @@ class ConsentManager:
 
         return (record.is_valid(), record)
 
-    def get_consent(
-        self,
-        subject_id: str,
-        purpose: str
-    ) -> Optional[ConsentRecord]:
+    def get_consent(self, subject_id: str, purpose: str) -> ConsentRecord | None:
         """
         Get the consent record for a subject and purpose.
 
@@ -983,37 +974,39 @@ class ConsentManager:
             ConsentRecord if found, None otherwise.
         """
         # Check cache first
-        if subject_id in self._consent_cache:
-            if purpose in self._consent_cache[subject_id]:
-                return self._consent_cache[subject_id][purpose]
+        if subject_id in self._consent_cache and purpose in self._consent_cache[subject_id]:
+            return self._consent_cache[subject_id][purpose]
 
         # Load from storage
         subject_file = self.storage_path / f"{subject_id}.json"
         if subject_file.exists():
-            with open(subject_file, 'r') as f:
+            with open(subject_file) as f:
                 records = json.load(f)
 
             if purpose in records:
                 data = records[purpose]
                 record = ConsentRecord(
-                    subject_id=data['subject_id'],
-                    purpose=data['purpose'],
-                    status=ConsentStatus(data['status']),
+                    subject_id=data["subject_id"],
+                    purpose=data["purpose"],
+                    status=ConsentStatus(data["status"]),
                     granted_at=(
-                        datetime.datetime.fromisoformat(data['granted_at'])
-                        if data.get('granted_at') else None
+                        datetime.datetime.fromisoformat(data["granted_at"])
+                        if data.get("granted_at")
+                        else None
                     ),
                     expires_at=(
-                        datetime.datetime.fromisoformat(data['expires_at'])
-                        if data.get('expires_at') else None
+                        datetime.datetime.fromisoformat(data["expires_at"])
+                        if data.get("expires_at")
+                        else None
                     ),
                     withdrawn_at=(
-                        datetime.datetime.fromisoformat(data['withdrawn_at'])
-                        if data.get('withdrawn_at') else None
+                        datetime.datetime.fromisoformat(data["withdrawn_at"])
+                        if data.get("withdrawn_at")
+                        else None
                     ),
-                    legal_basis=data.get('legal_basis'),
-                    data_categories=data.get('data_categories', []),
-                    metadata=data.get('metadata', {})
+                    legal_basis=data.get("legal_basis"),
+                    data_categories=data.get("data_categories", []),
+                    metadata=data.get("metadata", {}),
                 )
 
                 # Update cache
@@ -1025,11 +1018,7 @@ class ConsentManager:
 
         return None
 
-    def withdraw_consent(
-        self,
-        subject_id: str,
-        purpose: str
-    ) -> Optional[ConsentRecord]:
+    def withdraw_consent(self, subject_id: str, purpose: str) -> ConsentRecord | None:
         """
         Withdraw consent for a specific purpose.
 
@@ -1041,15 +1030,10 @@ class ConsentManager:
             Updated ConsentRecord if found, None otherwise.
         """
         return self.record_consent(
-            subject_id=subject_id,
-            purpose=purpose,
-            status=ConsentStatus.WITHDRAWN
+            subject_id=subject_id, purpose=purpose, status=ConsentStatus.WITHDRAWN
         )
 
-    def get_all_consents(
-        self,
-        subject_id: str
-    ) -> Dict[str, ConsentRecord]:
+    def get_all_consents(self, subject_id: str) -> dict[str, ConsentRecord]:
         """
         Get all consent records for a data subject.
 
@@ -1063,39 +1047,37 @@ class ConsentManager:
         consents = {}
 
         if subject_file.exists():
-            with open(subject_file, 'r') as f:
+            with open(subject_file) as f:
                 records = json.load(f)
 
             for purpose, data in records.items():
                 consents[purpose] = ConsentRecord(
-                    subject_id=data['subject_id'],
-                    purpose=data['purpose'],
-                    status=ConsentStatus(data['status']),
+                    subject_id=data["subject_id"],
+                    purpose=data["purpose"],
+                    status=ConsentStatus(data["status"]),
                     granted_at=(
-                        datetime.datetime.fromisoformat(data['granted_at'])
-                        if data.get('granted_at') else None
+                        datetime.datetime.fromisoformat(data["granted_at"])
+                        if data.get("granted_at")
+                        else None
                     ),
                     expires_at=(
-                        datetime.datetime.fromisoformat(data['expires_at'])
-                        if data.get('expires_at') else None
+                        datetime.datetime.fromisoformat(data["expires_at"])
+                        if data.get("expires_at")
+                        else None
                     ),
                     withdrawn_at=(
-                        datetime.datetime.fromisoformat(data['withdrawn_at'])
-                        if data.get('withdrawn_at') else None
+                        datetime.datetime.fromisoformat(data["withdrawn_at"])
+                        if data.get("withdrawn_at")
+                        else None
                     ),
-                    legal_basis=data.get('legal_basis'),
-                    data_categories=data.get('data_categories', []),
-                    metadata=data.get('metadata', {})
+                    legal_basis=data.get("legal_basis"),
+                    data_categories=data.get("data_categories", []),
+                    metadata=data.get("metadata", {}),
                 )
 
         return consents
 
-    def filter_by_consent(
-        self,
-        df: DataFrame,
-        subject_id_col: str,
-        purpose: str
-    ) -> DataFrame:
+    def filter_by_consent(self, df: DataFrame, subject_id_col: str, purpose: str) -> DataFrame:
         """
         Filter a DataFrame to only include subjects with valid consent.
 
@@ -1118,9 +1100,7 @@ class ConsentManager:
                 consented_ids.append(subject_id)
 
         if not consented_ids:
-            logger.warning(
-                f"No subjects have valid consent for purpose: {purpose}"
-            )
+            logger.warning(f"No subjects have valid consent for purpose: {purpose}")
             return df.limit(0)  # Return empty DataFrame with same schema
 
         # Filter DataFrame
@@ -1142,8 +1122,8 @@ class PIIDetector:
 
     def __init__(
         self,
-        config: Optional[ConfigManager] = None,
-        custom_patterns: Optional[Dict[str, str]] = None
+        config: ConfigManager | None = None,
+        custom_patterns: dict[str, str] | None = None,
     ):
         """
         Initialize the PII detector.
@@ -1155,9 +1135,7 @@ class PIIDetector:
         self.config = config or ConfigManager()
 
         # Load patterns from config
-        self.content_patterns = self.config.get(
-            "pii_detection", "patterns", default={}
-        )
+        self.content_patterns = self.config.get("pii_detection", "patterns", default={})
 
         # Add custom patterns
         if custom_patterns:
@@ -1165,17 +1143,15 @@ class PIIDetector:
 
         # Column name patterns
         self.column_patterns = self.config.get(
-            "pii_detection", "column_name_patterns",
-            default={"pii": [], "spi": [], "secure": []}
+            "pii_detection", "column_name_patterns", default={"pii": [], "spi": [], "secure": []}
         )
 
         # Compile regex patterns
         self._compiled_patterns = {
-            name: re.compile(pattern)
-            for name, pattern in self.content_patterns.items()
+            name: re.compile(pattern) for name, pattern in self.content_patterns.items()
         }
 
-    def scan_column_names(self, df: DataFrame) -> Dict[str, List[str]]:
+    def scan_column_names(self, df: DataFrame) -> dict[str, list[str]]:
         """
         Scan DataFrame column names for potential PII indicators.
 
@@ -1185,11 +1161,7 @@ class PIIDetector:
         Returns:
             Dictionary with PII categories and matching column names.
         """
-        results = {
-            "potential_pii": [],
-            "potential_spi": [],
-            "potential_secure": []
-        }
+        results = {"potential_pii": [], "potential_spi": [], "potential_secure": []}
 
         for column in df.columns:
             column_lower = column.lower()
@@ -1215,11 +1187,8 @@ class PIIDetector:
         return results
 
     def scan_content(
-        self,
-        df: DataFrame,
-        columns: Optional[List[str]] = None,
-        sample_size: int = 1000
-    ) -> Dict[str, Dict[str, Any]]:
+        self, df: DataFrame, columns: list[str] | None = None, sample_size: int = 1000
+    ) -> dict[str, dict[str, Any]]:
         """
         Scan DataFrame content for PII patterns.
 
@@ -1235,10 +1204,7 @@ class PIIDetector:
 
         # Get string columns if not specified
         if columns is None:
-            columns = [
-                f.name for f in df.schema.fields
-                if isinstance(f.dataType, StringType)
-            ]
+            columns = [f.name for f in df.schema.fields if isinstance(f.dataType, StringType)]
 
         # Sample the data for efficiency
         sample_df = df.select(columns).limit(sample_size)
@@ -1257,10 +1223,7 @@ class PIIDetector:
                 for pattern_name, pattern in self._compiled_patterns.items():
                     if pattern.search(value_str):
                         if pattern_name not in col_results:
-                            col_results[pattern_name] = {
-                                "count": 0,
-                                "samples": []
-                            }
+                            col_results[pattern_name] = {"count": 0, "samples": []}
                         col_results[pattern_name]["count"] += 1
                         if len(col_results[pattern_name]["samples"]) < 3:
                             # Store masked sample
@@ -1276,11 +1239,7 @@ class PIIDetector:
         """Mask PII in a sample value for safe storage."""
         return pattern.sub("[DETECTED]", value)
 
-    def full_scan(
-        self,
-        df: DataFrame,
-        sample_size: int = 1000
-    ) -> Dict[str, Any]:
+    def full_scan(self, df: DataFrame, sample_size: int = 1000) -> dict[str, Any]:
         """
         Perform a comprehensive PII scan on a DataFrame.
 
@@ -1300,8 +1259,8 @@ class PIIDetector:
                 "timestamp": datetime.datetime.now().isoformat(),
                 "total_columns": len(df.columns),
                 "sample_size": sample_size,
-                "patterns_used": list(self.content_patterns.keys())
-            }
+                "patterns_used": list(self.content_patterns.keys()),
+            },
         }
 
     def add_pattern(self, name: str, pattern: str) -> None:
@@ -1315,10 +1274,7 @@ class PIIDetector:
         self.content_patterns[name] = pattern
         self._compiled_patterns[name] = re.compile(pattern)
 
-    def get_suggested_tags(
-        self,
-        scan_results: Dict[str, Any]
-    ) -> Dict[str, Dict[str, str]]:
+    def get_suggested_tags(self, scan_results: dict[str, Any]) -> dict[str, dict[str, str]]:
         """
         Generate suggested GDPR tags based on scan results.
 
@@ -1337,14 +1293,14 @@ class PIIDetector:
             suggestions[col] = {
                 "gdpr_category": "PII",
                 "sensitivity": "HIGH",
-                "detection_method": "column_name"
+                "detection_method": "column_name",
             }
 
         for col in name_analysis.get("potential_spi", []):
             suggestions[col] = {
                 "gdpr_category": "SPI",
                 "sensitivity": "VERY_HIGH",
-                "detection_method": "column_name"
+                "detection_method": "column_name",
             }
 
         for col in name_analysis.get("potential_secure", []):
@@ -1352,7 +1308,7 @@ class PIIDetector:
                 "gdpr_category": "SPI",
                 "sensitivity": "VERY_HIGH",
                 "detection_method": "column_name",
-                "note": "security_credential"
+                "note": "security_credential",
             }
 
         # From content analysis
@@ -1369,14 +1325,14 @@ class PIIDetector:
                         "gdpr_category": "SPI",
                         "sensitivity": "VERY_HIGH",
                         "detection_method": "content_scan",
-                        "detected_patterns": list(patterns.keys())
+                        "detected_patterns": list(patterns.keys()),
                     }
                 else:
                     suggestions[col] = {
                         "gdpr_category": "PII",
                         "sensitivity": "HIGH",
                         "detection_method": "content_scan",
-                        "detected_patterns": list(patterns.keys())
+                        "detected_patterns": list(patterns.keys()),
                     }
 
         return suggestions
@@ -1396,11 +1352,7 @@ class AdvancedAnonymization:
     - Data Suppression
     """
 
-    def __init__(
-        self,
-        spark: SparkSession,
-        config: Optional[ConfigManager] = None
-    ):
+    def __init__(self, spark: SparkSession, config: ConfigManager | None = None):
         """
         Initialize advanced anonymization.
 
@@ -1410,9 +1362,7 @@ class AdvancedAnonymization:
         """
         self.spark = spark
         self.config = config or ConfigManager()
-        self.default_k = self.config.get(
-            "anonymization", "k_anonymity_default_k", default=5
-        )
+        self.default_k = self.config.get("anonymization", "k_anonymity_default_k", default=5)
         self.default_epsilon = self.config.get(
             "anonymization", "differential_privacy_epsilon", default=1.0
         )
@@ -1420,9 +1370,9 @@ class AdvancedAnonymization:
     def k_anonymize(
         self,
         df: DataFrame,
-        quasi_identifiers: List[str],
-        k: Optional[int] = None,
-        generalization_rules: Optional[Dict[str, Callable]] = None
+        quasi_identifiers: list[str],
+        k: int | None = None,
+        generalization_rules: dict[str, Callable] | None = None,
     ) -> DataFrame:
         """
         Apply k-anonymity to a DataFrame.
@@ -1463,17 +1413,14 @@ class AdvancedAnonymization:
 
         logger.info(
             f"K-anonymity applied (k={k}): {suppressed} records suppressed "
-            f"({suppressed/original_count*100:.1f}%)"
+            f"({suppressed / original_count * 100:.1f}%)"
         )
 
         return result
 
     def check_k_anonymity(
-        self,
-        df: DataFrame,
-        quasi_identifiers: List[str],
-        k: int
-    ) -> Dict[str, Any]:
+        self, df: DataFrame, quasi_identifiers: list[str], k: int
+    ) -> dict[str, Any]:
         """
         Check if a DataFrame satisfies k-anonymity.
 
@@ -1505,15 +1452,15 @@ class AdvancedAnonymization:
             "avg_group_size": avg_count,
             "total_groups": total_groups,
             "violating_groups": violating,
-            "compliance_rate": (total_groups - violating) / total_groups * 100
+            "compliance_rate": (total_groups - violating) / total_groups * 100,
         }
 
     def add_differential_privacy_noise(
         self,
         df: DataFrame,
-        numeric_columns: List[str],
-        epsilon: Optional[float] = None,
-        sensitivity: float = 1.0
+        numeric_columns: list[str],
+        epsilon: float | None = None,
+        sensitivity: float = 1.0,
     ) -> DataFrame:
         """
         Add Laplace noise to numeric columns for differential privacy.
@@ -1561,12 +1508,7 @@ class AdvancedAnonymization:
 
         return df
 
-    def generalize_numeric(
-        self,
-        df: DataFrame,
-        column: str,
-        bin_size: float
-    ) -> DataFrame:
+    def generalize_numeric(self, df: DataFrame, column: str, bin_size: float) -> DataFrame:
         """
         Generalize a numeric column into bins/ranges.
 
@@ -1584,16 +1526,11 @@ class AdvancedAnonymization:
             F.concat(
                 (F.floor(F.col(column) / bin_size) * bin_size).cast("string"),
                 F.lit("-"),
-                ((F.floor(F.col(column) / bin_size) + 1) * bin_size).cast("string")
-            )
+                ((F.floor(F.col(column) / bin_size) + 1) * bin_size).cast("string"),
+            ),
         )
 
-    def generalize_date(
-        self,
-        df: DataFrame,
-        column: str,
-        level: str = "month"
-    ) -> DataFrame:
+    def generalize_date(self, df: DataFrame, column: str, level: str = "month") -> DataFrame:
         """
         Generalize a date column to a coarser granularity.
 
@@ -1613,22 +1550,19 @@ class AdvancedAnonymization:
                 F.concat(
                     F.year(F.col(column)).cast("string"),
                     F.lit("-Q"),
-                    F.quarter(F.col(column)).cast("string")
-                )
+                    F.quarter(F.col(column)).cast("string"),
+                ),
             )
         elif level == "month":
-            return df.withColumn(
-                column,
-                F.date_format(F.col(column), "yyyy-MM")
-            )
+            return df.withColumn(column, F.date_format(F.col(column), "yyyy-MM"))
         elif level == "week":
             return df.withColumn(
                 column,
                 F.concat(
                     F.year(F.col(column)).cast("string"),
                     F.lit("-W"),
-                    F.weekofyear(F.col(column)).cast("string")
-                )
+                    F.weekofyear(F.col(column)).cast("string"),
+                ),
             )
         else:
             raise ValueError(f"Unknown generalization level: {level}")
@@ -1638,7 +1572,7 @@ class AdvancedAnonymization:
         df: DataFrame,
         column: str,
         lower_percentile: float = 0.01,
-        upper_percentile: float = 0.99
+        upper_percentile: float = 0.99,
     ) -> DataFrame:
         """
         Suppress outlier values in a numeric column.
@@ -1656,7 +1590,7 @@ class AdvancedAnonymization:
         percentiles = df.approxQuantile(
             column,
             [lower_percentile, upper_percentile],
-            0.01  # Relative error
+            0.01,  # Relative error
         )
 
         lower_bound, upper_bound = percentiles
@@ -1665,9 +1599,8 @@ class AdvancedAnonymization:
         return df.withColumn(
             column,
             F.when(
-                (F.col(column) >= lower_bound) & (F.col(column) <= upper_bound),
-                F.col(column)
-            ).otherwise(F.lit(None))
+                (F.col(column) >= lower_bound) & (F.col(column) <= upper_bound), F.col(column)
+            ).otherwise(F.lit(None)),
         )
 
 
@@ -1684,7 +1617,7 @@ class PandasProcessor:
     processors but optimized for in-memory processing with pandas.
     """
 
-    def __init__(self, config: Optional[ConfigManager] = None):
+    def __init__(self, config: ConfigManager | None = None):
         """
         Initialize the pandas processor.
 
@@ -1696,18 +1629,15 @@ class PandasProcessor:
         """
         if not PANDAS_AVAILABLE:
             raise ImportError(
-                "Pandas is required for PandasProcessor. "
-                "Install it with: pip install pandas numpy"
+                "Pandas is required for PandasProcessor. Install it with: pip install pandas numpy"
             )
 
         self.config = config or ConfigManager()
-        self._column_tags: Dict[str, Dict[str, Any]] = {}
-        self._dataset_tags: Dict[str, Any] = {}
+        self._column_tags: dict[str, dict[str, Any]] = {}
+        self._dataset_tags: dict[str, Any] = {}
 
     def apply_column_tags(
-        self,
-        df: pd.DataFrame,
-        column_tags: Dict[str, Dict[str, Any]]
+        self, df: pd.DataFrame, column_tags: dict[str, dict[str, Any]]
     ) -> pd.DataFrame:
         """
         Apply GDPR tags to columns (stored in memory).
@@ -1725,31 +1655,26 @@ class PandasProcessor:
                 logger.warning(f"Column '{col_name}' not in DataFrame")
                 continue
 
-            if "gdpr_category" in tags:
-                if tags["gdpr_category"] not in ["PII", "SPI", "NPII"]:
-                    raise ValueError(
-                        f"Invalid GDPR category: {tags['gdpr_category']}"
-                    )
+            if "gdpr_category" in tags and tags["gdpr_category"] not in ["PII", "SPI", "NPII"]:
+                raise ValueError(f"Invalid GDPR category: {tags['gdpr_category']}")
 
-            if "sensitivity" in tags:
-                if tags["sensitivity"] not in ["LOW", "MEDIUM", "HIGH", "VERY_HIGH"]:
-                    raise ValueError(
-                        f"Invalid sensitivity: {tags['sensitivity']}"
-                    )
+            if "sensitivity" in tags and tags["sensitivity"] not in [
+                "LOW",
+                "MEDIUM",
+                "HIGH",
+                "VERY_HIGH",
+            ]:
+                raise ValueError(f"Invalid sensitivity: {tags['sensitivity']}")
 
             self._column_tags[col_name] = tags
 
         return df
 
-    def get_column_tags(self) -> Dict[str, Dict[str, Any]]:
+    def get_column_tags(self) -> dict[str, dict[str, Any]]:
         """Get all applied column tags."""
         return self._column_tags.copy()
 
-    def mask_columns(
-        self,
-        df: pd.DataFrame,
-        mask_rules: Dict[str, str]
-    ) -> pd.DataFrame:
+    def mask_columns(self, df: pd.DataFrame, mask_rules: dict[str, str]) -> pd.DataFrame:
         """
         Apply masking to columns using pandas.
 
@@ -1768,12 +1693,16 @@ class PandasProcessor:
                 continue
 
             if mask_type == "hash":
-                result[column] = result[column].astype(str).apply(
-                    lambda x: hashlib.sha256(x.encode()).hexdigest()
+                result[column] = (
+                    result[column]
+                    .astype(str)
+                    .apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
                 )
             elif mask_type == "partial":
-                result[column] = result[column].astype(str).apply(
-                    lambda x: f"{x[:3]}***{x[-3:]}" if len(x) > 6 else "***"
+                result[column] = (
+                    result[column]
+                    .astype(str)
+                    .apply(lambda x: f"{x[:3]}***{x[-3:]}" if len(x) > 6 else "***")
                 )
             elif mask_type == "redact":
                 result[column] = "[REDACTED]"
@@ -1783,10 +1712,7 @@ class PandasProcessor:
         return result
 
     def pseudonymize_columns(
-        self,
-        df: pd.DataFrame,
-        columns: List[str],
-        salt: Optional[str] = None
+        self, df: pd.DataFrame, columns: list[str], salt: str | None = None
     ) -> pd.DataFrame:
         """
         Pseudonymize columns with consistent hashing.
@@ -1806,8 +1732,10 @@ class PandasProcessor:
             if column not in result.columns:
                 continue
 
-            result[column] = result[column].astype(str).apply(
-                lambda x: hashlib.sha256(f"{x}:{salt_value}".encode()).hexdigest()
+            result[column] = (
+                result[column]
+                .astype(str)
+                .apply(lambda x: hashlib.sha256(f"{x}:{salt_value}".encode()).hexdigest())
             )
 
         return result
@@ -1842,10 +1770,7 @@ class PandasProcessor:
         return result
 
     def request_erasure(
-        self,
-        df: pd.DataFrame,
-        identifier_col: str,
-        identifier_value: str
+        self, df: pd.DataFrame, identifier_col: str, identifier_value: str
     ) -> pd.DataFrame:
         """
         Handle erasure request by nullifying PII/SPI.
@@ -1862,9 +1787,9 @@ class PandasProcessor:
 
         # Find columns to erase
         cols_to_erase = [
-            col for col, tags in self._column_tags.items()
-            if tags.get("gdpr_category") in ["PII", "SPI"]
-            and col != identifier_col
+            col
+            for col, tags in self._column_tags.items()
+            if tags.get("gdpr_category") in ["PII", "SPI"] and col != identifier_col
         ]
 
         # Apply erasure
@@ -1876,10 +1801,7 @@ class PandasProcessor:
         return result
 
     def k_anonymize(
-        self,
-        df: pd.DataFrame,
-        quasi_identifiers: List[str],
-        k: int = 5
+        self, df: pd.DataFrame, quasi_identifiers: list[str], k: int = 5
     ) -> pd.DataFrame:
         """
         Apply k-anonymity using pandas.
@@ -1894,26 +1816,24 @@ class PandasProcessor:
         """
         # Count occurrences of each QI combination
         counts = df.groupby(quasi_identifiers).size().reset_index()
-        counts.columns = list(counts.columns[:-1]) + ['_count']
+        counts.columns = list(counts.columns[:-1]) + ["_count"]
 
         # Filter valid groups
-        valid = counts[counts['_count'] >= k].drop(columns=['_count'])
+        valid = counts[counts["_count"] >= k].drop(columns=["_count"])
 
         # Join back
-        result = df.merge(valid, on=quasi_identifiers, how='inner')
+        result = df.merge(valid, on=quasi_identifiers, how="inner")
 
-        logger.info(
-            f"K-anonymity (k={k}): {len(df) - len(result)} records suppressed"
-        )
+        logger.info(f"K-anonymity (k={k}): {len(df) - len(result)} records suppressed")
 
         return result
 
     def add_differential_privacy_noise(
         self,
         df: pd.DataFrame,
-        numeric_columns: List[str],
+        numeric_columns: list[str],
         epsilon: float = 1.0,
-        sensitivity: float = 1.0
+        sensitivity: float = 1.0,
     ) -> pd.DataFrame:
         """
         Add Laplace noise for differential privacy.
@@ -1937,11 +1857,7 @@ class PandasProcessor:
 
         return result
 
-    def export_metadata_catalog(
-        self,
-        df: pd.DataFrame,
-        path: str
-    ) -> None:
+    def export_metadata_catalog(self, df: pd.DataFrame, path: str) -> None:
         """
         Export metadata catalog to JSON.
 
@@ -1954,10 +1870,10 @@ class PandasProcessor:
             "column_metadata": self._column_tags,
             "schema": {col: str(dtype) for col, dtype in df.dtypes.items()},
             "row_count": len(df),
-            "exported_at": datetime.datetime.now().isoformat()
+            "exported_at": datetime.datetime.now().isoformat(),
         }
 
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             json.dump(catalog, f, indent=2)
 
         logger.info(f"Metadata catalog exported to {path}")
@@ -1981,7 +1897,7 @@ class PolarsProcessor:
     - Spark overhead isn't justified for single-machine processing
     """
 
-    def __init__(self, config: Optional[ConfigManager] = None):
+    def __init__(self, config: ConfigManager | None = None):
         """
         Initialize the Polars processor.
 
@@ -1993,18 +1909,15 @@ class PolarsProcessor:
         """
         if not POLARS_AVAILABLE:
             raise ImportError(
-                "Polars is required for PolarsProcessor. "
-                "Install it with: pip install polars"
+                "Polars is required for PolarsProcessor. Install it with: pip install polars"
             )
 
         self.config = config or ConfigManager()
-        self._column_tags: Dict[str, Dict[str, Any]] = {}
-        self._dataset_tags: Dict[str, Any] = {}
+        self._column_tags: dict[str, dict[str, Any]] = {}
+        self._dataset_tags: dict[str, Any] = {}
 
     def apply_column_tags(
-        self,
-        df: pl.DataFrame,
-        column_tags: Dict[str, Dict[str, Any]]
+        self, df: pl.DataFrame, column_tags: dict[str, dict[str, Any]]
     ) -> pl.DataFrame:
         """
         Apply GDPR tags to columns (stored in memory).
@@ -2022,31 +1935,26 @@ class PolarsProcessor:
                 logger.warning(f"Column '{col_name}' not in DataFrame")
                 continue
 
-            if "gdpr_category" in tags:
-                if tags["gdpr_category"] not in ["PII", "SPI", "NPII"]:
-                    raise ValueError(
-                        f"Invalid GDPR category: {tags['gdpr_category']}"
-                    )
+            if "gdpr_category" in tags and tags["gdpr_category"] not in ["PII", "SPI", "NPII"]:
+                raise ValueError(f"Invalid GDPR category: {tags['gdpr_category']}")
 
-            if "sensitivity" in tags:
-                if tags["sensitivity"] not in ["LOW", "MEDIUM", "HIGH", "VERY_HIGH"]:
-                    raise ValueError(
-                        f"Invalid sensitivity: {tags['sensitivity']}"
-                    )
+            if "sensitivity" in tags and tags["sensitivity"] not in [
+                "LOW",
+                "MEDIUM",
+                "HIGH",
+                "VERY_HIGH",
+            ]:
+                raise ValueError(f"Invalid sensitivity: {tags['sensitivity']}")
 
             self._column_tags[col_name] = tags
 
         return df
 
-    def get_column_tags(self) -> Dict[str, Dict[str, Any]]:
+    def get_column_tags(self) -> dict[str, dict[str, Any]]:
         """Get all applied column tags."""
         return self._column_tags.copy()
 
-    def mask_columns(
-        self,
-        df: pl.DataFrame,
-        mask_rules: Dict[str, str]
-    ) -> pl.DataFrame:
+    def mask_columns(self, df: pl.DataFrame, mask_rules: dict[str, str]) -> pl.DataFrame:
         """
         Apply masking to columns using Polars (vectorized operations).
 
@@ -2067,34 +1975,34 @@ class PolarsProcessor:
             if mask_type == "hash":
                 # Use map_elements for hashing (Polars doesn't have native SHA256)
                 result = result.with_columns(
-                    pl.col(column).cast(pl.Utf8).map_elements(
-                        lambda x: hashlib.sha256(str(x).encode()).hexdigest(),
-                        return_dtype=pl.Utf8
-                    ).alias(column)
+                    pl.col(column)
+                    .cast(pl.Utf8)
+                    .map_elements(
+                        lambda x: hashlib.sha256(str(x).encode()).hexdigest(), return_dtype=pl.Utf8
+                    )
+                    .alias(column)
                 )
             elif mask_type == "partial":
                 # Partial masking: show first 3 and last 3 chars
                 result = result.with_columns(
-                    pl.col(column).cast(pl.Utf8).map_elements(
+                    pl.col(column)
+                    .cast(pl.Utf8)
+                    .map_elements(
                         lambda x: f"{x[:3]}***{x[-3:]}" if len(str(x)) > 6 else "***",
-                        return_dtype=pl.Utf8
-                    ).alias(column)
+                        return_dtype=pl.Utf8,
+                    )
+                    .alias(column)
                 )
             elif mask_type == "redact":
                 # Full redaction - vectorized
-                result = result.with_columns(
-                    pl.lit("[REDACTED]").alias(column)
-                )
+                result = result.with_columns(pl.lit("[REDACTED]").alias(column))
             else:
                 raise ValueError(f"Unknown mask type: {mask_type}")
 
         return result
 
     def pseudonymize_columns(
-        self,
-        df: pl.DataFrame,
-        columns: List[str],
-        salt: Optional[str] = None
+        self, df: pl.DataFrame, columns: list[str], salt: str | None = None
     ) -> pl.DataFrame:
         """
         Pseudonymize columns with consistent hashing.
@@ -2115,10 +2023,13 @@ class PolarsProcessor:
                 continue
 
             result = result.with_columns(
-                pl.col(column).cast(pl.Utf8).map_elements(
+                pl.col(column)
+                .cast(pl.Utf8)
+                .map_elements(
                     lambda x: hashlib.sha256(f"{x}:{salt_value}".encode()).hexdigest(),
-                    return_dtype=pl.Utf8
-                ).alias(column)
+                    return_dtype=pl.Utf8,
+                )
+                .alias(column)
             )
 
         return result
@@ -2153,10 +2064,7 @@ class PolarsProcessor:
         return result
 
     def request_erasure(
-        self,
-        df: pl.DataFrame,
-        identifier_col: str,
-        identifier_value: str
+        self, df: pl.DataFrame, identifier_col: str, identifier_value: str
     ) -> pl.DataFrame:
         """
         Handle erasure request by nullifying PII/SPI.
@@ -2171,9 +2079,9 @@ class PolarsProcessor:
         """
         # Find columns to erase
         cols_to_erase = [
-            col for col, tags in self._column_tags.items()
-            if tags.get("gdpr_category") in ["PII", "SPI"]
-            and col != identifier_col
+            col
+            for col, tags in self._column_tags.items()
+            if tags.get("gdpr_category") in ["PII", "SPI"] and col != identifier_col
         ]
 
         # Build expressions for conditional null
@@ -2192,10 +2100,7 @@ class PolarsProcessor:
         return df.select(exprs)
 
     def k_anonymize(
-        self,
-        df: pl.DataFrame,
-        quasi_identifiers: List[str],
-        k: int = 5
+        self, df: pl.DataFrame, quasi_identifiers: list[str], k: int = 5
     ) -> pl.DataFrame:
         """
         Apply k-anonymity using Polars (optimized group operations).
@@ -2209,9 +2114,7 @@ class PolarsProcessor:
             K-anonymized DataFrame.
         """
         # Count occurrences of each QI combination
-        counts = df.group_by(quasi_identifiers).agg(
-            pl.count().alias("_count")
-        )
+        counts = df.group_by(quasi_identifiers).agg(pl.len().alias("_count"))
 
         # Filter valid groups (count >= k)
         valid_groups = counts.filter(pl.col("_count") >= k).drop("_count")
@@ -2227,9 +2130,9 @@ class PolarsProcessor:
     def add_differential_privacy_noise(
         self,
         df: pl.DataFrame,
-        numeric_columns: List[str],
+        numeric_columns: list[str],
         epsilon: float = 1.0,
-        sensitivity: float = 1.0
+        sensitivity: float = 1.0,
     ) -> pl.DataFrame:
         """
         Add Laplace noise for differential privacy.
@@ -2255,17 +2158,12 @@ class PolarsProcessor:
                 noise = np.random.laplace(0, scale, n_rows)
                 noise_series = pl.Series("_noise", noise)
 
-                result = result.with_columns(
-                    (pl.col(col) + noise_series).alias(col)
-                )
+                result = result.with_columns((pl.col(col) + noise_series).alias(col))
 
         return result
 
     def generalize_numeric(
-        self,
-        df: pl.DataFrame,
-        column: str,
-        bin_size: float = 10.0
+        self, df: pl.DataFrame, column: str, bin_size: float = 10.0
     ) -> pl.DataFrame:
         """
         Generalize numeric values into ranges.
@@ -2280,16 +2178,9 @@ class PolarsProcessor:
         """
         lower = ((pl.col(column) / bin_size).floor() * bin_size).cast(pl.Int64).cast(pl.Utf8)
         upper = (((pl.col(column) / bin_size).floor() + 1) * bin_size).cast(pl.Int64).cast(pl.Utf8)
-        return df.with_columns(
-            pl.concat_str([lower, pl.lit("-"), upper]).alias(column)
-        )
+        return df.with_columns(pl.concat_str([lower, pl.lit("-"), upper]).alias(column))
 
-    def generalize_date(
-        self,
-        df: pl.DataFrame,
-        column: str,
-        level: str = "month"
-    ) -> pl.DataFrame:
+    def generalize_date(self, df: pl.DataFrame, column: str, level: str = "month") -> pl.DataFrame:
         """
         Generalize date values to reduce precision.
 
@@ -2302,28 +2193,29 @@ class PolarsProcessor:
             DataFrame with generalized dates.
         """
         if level == "year":
-            return df.with_columns(
-                pl.col(column).dt.year().cast(pl.Utf8).alias(column)
-            )
+            return df.with_columns(pl.col(column).dt.year().cast(pl.Utf8).alias(column))
         elif level == "month":
             return df.with_columns(
-                (pl.col(column).dt.year().cast(pl.Utf8) + pl.lit("-") +
-                 pl.col(column).dt.month().cast(pl.Utf8).str.zfill(2)).alias(column)
+                (
+                    pl.col(column).dt.year().cast(pl.Utf8)
+                    + pl.lit("-")
+                    + pl.col(column).dt.month().cast(pl.Utf8).str.zfill(2)
+                ).alias(column)
             )
         elif level == "quarter":
             return df.with_columns(
-                (pl.col(column).dt.year().cast(pl.Utf8) + pl.lit("-Q") +
-                 pl.col(column).dt.quarter().cast(pl.Utf8)).alias(column)
+                (
+                    pl.col(column).dt.year().cast(pl.Utf8)
+                    + pl.lit("-Q")
+                    + pl.col(column).dt.quarter().cast(pl.Utf8)
+                ).alias(column)
             )
         else:
             raise ValueError(f"Unknown generalization level: {level}")
 
     def check_k_anonymity(
-        self,
-        df: pl.DataFrame,
-        quasi_identifiers: List[str],
-        k: int = 5
-    ) -> Dict[str, Any]:
+        self, df: pl.DataFrame, quasi_identifiers: list[str], k: int = 5
+    ) -> dict[str, Any]:
         """
         Check if DataFrame satisfies k-anonymity.
 
@@ -2336,9 +2228,7 @@ class PolarsProcessor:
             Dictionary with k-anonymity analysis results.
         """
         # Count group sizes
-        counts = df.group_by(quasi_identifiers).agg(
-            pl.count().alias("_count")
-        )
+        counts = df.group_by(quasi_identifiers).agg(pl.len().alias("_count"))
 
         min_count = counts.select(pl.col("_count").min()).item()
         max_count = counts.select(pl.col("_count").max()).item()
@@ -2352,14 +2242,10 @@ class PolarsProcessor:
             "max_group_size": max_count,
             "total_groups": total_groups,
             "violating_groups": violating_groups,
-            "compliance_rate": round((total_groups - violating_groups) / total_groups * 100, 2)
+            "compliance_rate": round((total_groups - violating_groups) / total_groups * 100, 2),
         }
 
-    def export_metadata_catalog(
-        self,
-        df: pl.DataFrame,
-        path: str
-    ) -> None:
+    def export_metadata_catalog(self, df: pl.DataFrame, path: str) -> None:
         """
         Export metadata catalog to JSON.
 
@@ -2373,10 +2259,10 @@ class PolarsProcessor:
             "schema": {col: str(dtype) for col, dtype in zip(df.columns, df.dtypes)},
             "row_count": len(df),
             "exported_at": datetime.datetime.now().isoformat(),
-            "backend": "polars"
+            "backend": "polars",
         }
 
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             json.dump(catalog, f, indent=2)
 
         logger.info(f"Metadata catalog exported to {path}")
@@ -2459,11 +2345,7 @@ class Benchmark:
     actual execution times across all available backends.
     """
 
-    def __init__(
-        self,
-        spark: Optional[SparkSession] = None,
-        config: Optional[ConfigManager] = None
-    ):
+    def __init__(self, spark: SparkSession | None = None, config: ConfigManager | None = None):
         """
         Initialize benchmark utilities.
 
@@ -2473,9 +2355,9 @@ class Benchmark:
         """
         self.spark = spark
         self.config = config or ConfigManager()
-        self.results: List[BenchmarkResult] = []
+        self.results: list[BenchmarkResult] = []
 
-    def _measure_time(self, func: Callable) -> Tuple[Any, float]:
+    def _measure_time(self, func: Callable) -> tuple[Any, float]:
         """Measure execution time of a function."""
         start = time.perf_counter()
         result = func()
@@ -2485,12 +2367,12 @@ class Benchmark:
     def benchmark_operation(
         self,
         operation_name: str,
-        spark_func: Optional[Callable] = None,
-        pandas_func: Optional[Callable] = None,
-        polars_func: Optional[Callable] = None,
+        spark_func: Callable | None = None,
+        pandas_func: Callable | None = None,
+        polars_func: Callable | None = None,
         row_count: int = 0,
-        column_count: int = 0
-    ) -> Dict[str, BenchmarkResult]:
+        column_count: int = 0,
+    ) -> dict[str, BenchmarkResult]:
         """
         Benchmark an operation on all available backends.
 
@@ -2514,7 +2396,7 @@ class Benchmark:
                 backend="spark",
                 row_count=row_count,
                 column_count=column_count,
-                execution_time_seconds=spark_time
+                execution_time_seconds=spark_time,
             )
             results["spark"] = result
             self.results.append(result)
@@ -2526,7 +2408,7 @@ class Benchmark:
                 backend="pandas",
                 row_count=row_count,
                 column_count=column_count,
-                execution_time_seconds=pandas_time
+                execution_time_seconds=pandas_time,
             )
             results["pandas"] = result
             self.results.append(result)
@@ -2538,7 +2420,7 @@ class Benchmark:
                 backend="polars",
                 row_count=row_count,
                 column_count=column_count,
-                execution_time_seconds=polars_time
+                execution_time_seconds=polars_time,
             )
             results["polars"] = result
             self.results.append(result)
@@ -2547,11 +2429,11 @@ class Benchmark:
 
     def run_anonymization_benchmark(
         self,
-        spark_df: Optional[DataFrame] = None,
-        pandas_df: Optional[pd.DataFrame] = None,
-        polars_df: Optional[pl.DataFrame] = None,
-        columns_to_mask: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
+        spark_df: DataFrame | None = None,
+        pandas_df: pd.DataFrame | None = None,
+        polars_df: pl.DataFrame | None = None,
+        columns_to_mask: list[str] | None = None,
+    ) -> dict[str, Any]:
         """
         Run a comprehensive anonymization benchmark across all backends.
 
@@ -2564,10 +2446,7 @@ class Benchmark:
         Returns:
             Benchmark comparison results.
         """
-        results = {
-            "operations": {},
-            "summary": {}
-        }
+        results = {"operations": {}, "summary": {}}
 
         if columns_to_mask is None:
             columns_to_mask = ["col1"]
@@ -2578,9 +2457,13 @@ class Benchmark:
         polars_rows = len(polars_df) if polars_df is not None else 0
         row_count = spark_rows or pandas_rows or polars_rows
         col_count = (
-            len(spark_df.columns) if spark_df else
-            len(pandas_df.columns) if pandas_df is not None else
-            len(polars_df.columns) if polars_df is not None else 0
+            len(spark_df.columns)
+            if spark_df
+            else len(pandas_df.columns)
+            if pandas_df is not None
+            else len(polars_df.columns)
+            if polars_df is not None
+            else 0
         )
 
         # Hash masking benchmark
@@ -2589,6 +2472,7 @@ class Benchmark:
         def spark_hash():
             if spark_df:
                 from spart import AnonymizationManager, MetadataManager
+
                 mgr = MetadataManager(self.spark)
                 anon = AnonymizationManager(mgr)
                 return anon.mask_columns(spark_df, mask_rules).count()
@@ -2609,32 +2493,27 @@ class Benchmark:
             pandas_hash if pandas_df is not None else None,
             polars_hash if polars_df is not None else None,
             row_count,
-            col_count
+            col_count,
         )
 
         # Pseudonymization benchmark
         def spark_pseudo():
             if spark_df:
                 from spart import AnonymizationManager, MetadataManager
+
                 mgr = MetadataManager(self.spark)
                 anon = AnonymizationManager(mgr)
-                return anon.pseudonymize_columns(
-                    spark_df, columns_to_mask, "salt"
-                ).count()
+                return anon.pseudonymize_columns(spark_df, columns_to_mask, "salt").count()
 
         def pandas_pseudo():
             if pandas_df is not None:
                 proc = PandasProcessor()
-                return len(proc.pseudonymize_columns(
-                    pandas_df, columns_to_mask, "salt"
-                ))
+                return len(proc.pseudonymize_columns(pandas_df, columns_to_mask, "salt"))
 
         def polars_pseudo():
             if polars_df is not None:
                 proc = PolarsProcessor()
-                return len(proc.pseudonymize_columns(
-                    polars_df, columns_to_mask, "salt"
-                ))
+                return len(proc.pseudonymize_columns(polars_df, columns_to_mask, "salt"))
 
         results["operations"]["pseudonymization"] = self.benchmark_operation(
             "pseudonymization",
@@ -2642,14 +2521,16 @@ class Benchmark:
             pandas_pseudo if pandas_df is not None else None,
             polars_pseudo if polars_df is not None else None,
             row_count,
-            col_count
+            col_count,
         )
 
         # K-anonymity benchmark (if quasi-identifiers available)
         if len(columns_to_mask) >= 2:
+
             def spark_kanon():
                 if spark_df:
                     from spart import AdvancedAnonymization
+
                     adv = AdvancedAnonymization(self.spark)
                     return adv.k_anonymize(spark_df, columns_to_mask[:2], k=2).count()
 
@@ -2669,22 +2550,13 @@ class Benchmark:
                 pandas_kanon if pandas_df is not None else None,
                 polars_kanon if polars_df is not None else None,
                 row_count,
-                col_count
+                col_count,
             )
 
         # Calculate summary
-        spark_total = sum(
-            r.execution_time_seconds for r in self.results
-            if r.backend == "spark"
-        )
-        pandas_total = sum(
-            r.execution_time_seconds for r in self.results
-            if r.backend == "pandas"
-        )
-        polars_total = sum(
-            r.execution_time_seconds for r in self.results
-            if r.backend == "polars"
-        )
+        spark_total = sum(r.execution_time_seconds for r in self.results if r.backend == "spark")
+        pandas_total = sum(r.execution_time_seconds for r in self.results if r.backend == "pandas")
+        polars_total = sum(r.execution_time_seconds for r in self.results if r.backend == "polars")
 
         # Find fastest backend
         times = {}
@@ -2706,24 +2578,20 @@ class Benchmark:
             "fastest_backend": fastest,
             "speedup_vs_spark": {
                 "pandas": round(spark_total / pandas_total, 2) if pandas_total > 0 else None,
-                "polars": round(spark_total / polars_total, 2) if polars_total > 0 else None
+                "polars": round(spark_total / polars_total, 2) if polars_total > 0 else None,
             },
             "speedup_vs_pandas": {
                 "polars": round(pandas_total / polars_total, 2) if polars_total > 0 else None
             },
-            "recommendation": self._get_recommendation(row_count)
+            "recommendation": self._get_recommendation(row_count),
         }
 
         return results
 
     def _get_recommendation(self, row_count: int) -> str:
         """Get backend recommendation based on row count."""
-        pandas_threshold = self.config.get(
-            "processing", "pandas_threshold_rows", default=50000
-        )
-        polars_threshold = self.config.get(
-            "processing", "polars_threshold_rows", default=500000
-        )
+        pandas_threshold = self.config.get("processing", "pandas_threshold_rows", default=50000)
+        polars_threshold = self.config.get("processing", "polars_threshold_rows", default=500000)
 
         if row_count <= pandas_threshold:
             if POLARS_AVAILABLE:
@@ -2754,10 +2622,8 @@ class Benchmark:
             )
 
     def run_full_benchmark_suite(
-        self,
-        row_counts: Optional[List[int]] = None,
-        columns: int = 10
-    ) -> Dict[str, Any]:
+        self, row_counts: list[int] | None = None, columns: int = 10
+    ) -> dict[str, Any]:
         """
         Run a comprehensive benchmark suite across multiple data sizes.
 
@@ -2778,19 +2644,16 @@ class Benchmark:
                 "backends_available": {
                     "spark": self.spark is not None,
                     "pandas": PANDAS_AVAILABLE,
-                    "polars": POLARS_AVAILABLE
-                }
-            }
+                    "polars": POLARS_AVAILABLE,
+                },
+            },
         }
 
         for row_count in row_counts:
             logger.info(f"Benchmarking with {row_count:,} rows...")
 
             # Create test data
-            test_data = [
-                [f"value_{r}_{c}" for c in range(columns)]
-                for r in range(row_count)
-            ]
+            test_data = [[f"value_{r}_{c}" for c in range(columns)] for r in range(row_count)]
             col_names = [f"col_{i}" for i in range(columns)]
 
             spark_df = None
@@ -2811,13 +2674,10 @@ class Benchmark:
                 spark_df=spark_df,
                 pandas_df=pandas_df,
                 polars_df=polars_df,
-                columns_to_mask=col_names[:2]
+                columns_to_mask=col_names[:2],
             )
 
-            all_results["benchmarks"].append({
-                "row_count": row_count,
-                "results": bench_results
-            })
+            all_results["benchmarks"].append({"row_count": row_count, "results": bench_results})
 
             # Clear results for next iteration
             self.results = []
@@ -2890,7 +2750,7 @@ class Benchmark:
             format: Export format ('json', 'csv').
         """
         if format == "json":
-            with open(path, 'w') as f:
+            with open(path, "w") as f:
                 json.dump([asdict(r) for r in self.results], f, indent=2)
         elif format == "csv":
             if PANDAS_AVAILABLE:
@@ -2919,8 +2779,8 @@ class StreamingManager:
     def __init__(
         self,
         spark: SparkSession,
-        config: Optional[ConfigManager] = None,
-        consent_manager: Optional[ConsentManager] = None
+        config: ConfigManager | None = None,
+        consent_manager: ConsentManager | None = None,
     ):
         """
         Initialize the streaming manager.
@@ -2935,10 +2795,7 @@ class StreamingManager:
         self.consent_manager = consent_manager
 
     def create_anonymization_stream(
-        self,
-        input_stream: DataFrame,
-        mask_rules: Dict[str, str],
-        checkpoint_path: str
+        self, input_stream: DataFrame, mask_rules: dict[str, str], checkpoint_path: str
     ) -> DataFrame:
         """
         Create a streaming anonymization pipeline.
@@ -2964,9 +2821,7 @@ class StreamingManager:
                 mask_expressions[column] = F.sha2(col_ref, 256)
             elif mask_type == "partial":
                 mask_expressions[column] = F.concat_ws(
-                    "***",
-                    F.substring(col_ref, 1, 3),
-                    F.substring(col_ref, -3, 3)
+                    "***", F.substring(col_ref, 1, 3), F.substring(col_ref, -3, 3)
                 )
             elif mask_type == "redact":
                 mask_expressions[column] = F.lit("[REDACTED]")
@@ -2982,7 +2837,7 @@ class StreamingManager:
         output_path: str,
         checkpoint_path: str,
         output_mode: str = "append",
-        trigger_interval: str = "10 seconds"
+        trigger_interval: str = "10 seconds",
     ):
         """
         Write an anonymized stream to storage.
@@ -2998,8 +2853,7 @@ class StreamingManager:
             StreamingQuery handle.
         """
         return (
-            stream.writeStream
-            .format("parquet")
+            stream.writeStream.format("parquet")
             .option("path", output_path)
             .option("checkpointLocation", checkpoint_path)
             .outputMode(output_mode)
@@ -3025,7 +2879,7 @@ class MetadataManager:
     GDPR_CATEGORIES = {
         "PII": "Personally Identifiable Information",
         "SPI": "Sensitive Personal Information",
-        "NPII": "Non-Personally Identifiable Information"
+        "NPII": "Non-Personally Identifiable Information",
     }
 
     # Sensitivity levels
@@ -3035,8 +2889,8 @@ class MetadataManager:
         self,
         spark: SparkSession,
         metadata_col_name: str = "_metadata",
-        config: Optional[ConfigManager] = None,
-        audit_manager: Optional[AuditManager] = None
+        config: ConfigManager | None = None,
+        audit_manager: AuditManager | None = None,
     ):
         """
         Initialize the metadata manager.
@@ -3063,11 +2917,7 @@ class MetadataManager:
         is_databricks = self.spark.conf.get(spark_version_tag, "")
         self.is_databricks = bool(is_databricks)
 
-    def apply_column_tags(
-        self,
-        df: DataFrame,
-        column_tags: Dict[str, Dict[str, Any]]
-    ) -> DataFrame:
+    def apply_column_tags(self, df: DataFrame, column_tags: dict[str, dict[str, Any]]) -> DataFrame:
         """
         Apply GDPR tags and metadata at column level.
 
@@ -3087,9 +2937,7 @@ class MetadataManager:
                 comment = json.dumps(tags)
                 df = df.withColumn(
                     column_name,
-                    F.col(column_name).alias(
-                        column_name, metadata={"gdpr_tags": comment}
-                    )
+                    F.col(column_name).alias(column_name, metadata={"gdpr_tags": comment}),
                 )
 
         # Log audit event
@@ -3099,16 +2947,12 @@ class MetadataManager:
                 actor="metadata_manager",
                 action="apply_column_tags",
                 resource="dataframe",
-                details={"columns": list(column_tags.keys())}
+                details={"columns": list(column_tags.keys())},
             )
 
         return df
 
-    def apply_dataset_tags(
-        self,
-        df: DataFrame,
-        dataset_tags: Dict[str, str]
-    ) -> DataFrame:
+    def apply_dataset_tags(self, df: DataFrame, dataset_tags: dict[str, str]) -> DataFrame:
         """
         Apply tags and metadata at dataset level using a hidden column.
 
@@ -3134,7 +2978,7 @@ class MetadataManager:
 
         return df
 
-    def scan_for_pii(self, df: DataFrame) -> Dict[str, List[str]]:
+    def scan_for_pii(self, df: DataFrame) -> dict[str, list[str]]:
         """
         Scan DataFrame column names to identify potential PII/SPI.
 
@@ -3161,13 +3005,9 @@ class MetadataManager:
             metadata = column.metadata
             if "gdpr_tags" in metadata:
                 try:
-                    column_metadata[column.name] = json.loads(
-                        metadata["gdpr_tags"]
-                    )
+                    column_metadata[column.name] = json.loads(metadata["gdpr_tags"])
                 except json.JSONDecodeError:
-                    logger.warning(
-                        f"Could not parse gdpr_tags for column {column.name}"
-                    )
+                    logger.warning(f"Could not parse gdpr_tags for column {column.name}")
                     column_metadata[column.name] = {"error": "invalid JSON"}
             else:
                 column_metadata[column.name] = {"gdpr_category": "UNKNOWN"}
@@ -3188,7 +3028,7 @@ class MetadataManager:
             "dataset_metadata": dataset_metadata,
             "column_metadata": column_metadata,
             "schema": str(df.schema),
-            "exported_at": datetime.datetime.now().isoformat()
+            "exported_at": datetime.datetime.now().isoformat(),
         }
 
         # Save catalog as JSON
@@ -3196,7 +3036,7 @@ class MetadataManager:
             with open(path, "w") as f:
                 json.dump(catalog, f, indent=2)
             logger.info(f"Metadata catalog exported to {path}")
-        except IOError as e:
+        except OSError as e:
             logger.error(f"Failed to write metadata catalog to {path}: {e}")
 
         # Log audit event
@@ -3205,14 +3045,11 @@ class MetadataManager:
                 event_type=AuditEventType.EXPORT,
                 actor="metadata_manager",
                 action="export_metadata_catalog",
-                resource=path
+                resource=path,
             )
 
     def apply_tags_to_delta_table(
-        self,
-        table_name: str,
-        tags: Dict[str, str],
-        use_unity_catalog: bool = True
+        self, table_name: str, tags: dict[str, str], use_unity_catalog: bool = True
     ) -> None:
         """
         Apply tags to a Delta table (Databricks only).
@@ -3225,18 +3062,15 @@ class MetadataManager:
         if not self.is_databricks:
             msg = "This method only works in a Databricks environment."
             logger.error(msg)
-            raise EnvironmentError(msg)
+            raise OSError(msg)
 
         # Sanitize tag keys and values
         sanitized_tags = {
-            k.replace("'", "''").replace("\\", "\\\\"):
-            v.replace("'", "''").replace("\\", "\\\\")
+            k.replace("'", "''").replace("\\", "\\\\"): v.replace("'", "''").replace("\\", "\\\\")
             for k, v in tags.items()
         }
 
-        tags_str = ", ".join([
-            f"'{k}' = '{v}'" for k, v in sanitized_tags.items()
-        ])
+        tags_str = ", ".join([f"'{k}' = '{v}'" for k, v in sanitized_tags.items()])
 
         if use_unity_catalog:
             sql_command = f"ALTER TABLE {table_name} SET TAGS ({tags_str})"
@@ -3252,9 +3086,7 @@ class MetadataManager:
             raise
 
     def apply_column_tags_to_delta_table(
-        self,
-        table_name: str,
-        column_tags: Dict[str, Dict[str, str]]
+        self, table_name: str, column_tags: dict[str, dict[str, str]]
     ) -> None:
         """
         Apply tags to columns in a Delta table using Unity Catalog.
@@ -3266,36 +3098,30 @@ class MetadataManager:
         if not self.is_databricks:
             msg = "This method only works in a Databricks environment."
             logger.error(msg)
-            raise EnvironmentError(msg)
+            raise OSError(msg)
 
         for column_name, tags in column_tags.items():
             safe_column = column_name.replace("`", "``")
             sanitized_tags = {
-                k.replace("'", "''").replace("\\", "\\\\"):
-                v.replace("'", "''").replace("\\", "\\\\")
+                k.replace("'", "''").replace("\\", "\\\\"): v.replace("'", "''").replace(
+                    "\\", "\\\\"
+                )
                 for k, v in tags.items()
             }
 
-            tags_str = ", ".join([
-                f"'{k}' = '{v}'" for k, v in sanitized_tags.items()
-            ])
+            tags_str = ", ".join([f"'{k}' = '{v}'" for k, v in sanitized_tags.items()])
             sql_command = (
-                f"ALTER TABLE {table_name} "
-                f"ALTER COLUMN `{safe_column}` SET TAGS ({tags_str})"
+                f"ALTER TABLE {table_name} ALTER COLUMN `{safe_column}` SET TAGS ({tags_str})"
             )
 
             try:
                 self.spark.sql(sql_command)
-                logger.info(
-                    f"Tags applied to column '{column_name}' in {table_name}"
-                )
+                logger.info(f"Tags applied to column '{column_name}' in {table_name}")
             except Exception as e:
-                logger.error(
-                    f"Failed to apply tags to column '{column_name}': {e}"
-                )
+                logger.error(f"Failed to apply tags to column '{column_name}': {e}")
                 raise
 
-    def get_table_tags(self, table_name: str) -> Dict[str, str]:
+    def get_table_tags(self, table_name: str) -> dict[str, str]:
         """
         Retrieve tags from a Delta table in Unity Catalog.
 
@@ -3308,7 +3134,7 @@ class MetadataManager:
         if not self.is_databricks:
             msg = "This method only works in a Databricks environment."
             logger.error(msg)
-            raise EnvironmentError(msg)
+            raise OSError(msg)
 
         try:
             parts = table_name.split(".")
@@ -3323,25 +3149,18 @@ class MetadataManager:
                 return {row["tag_name"]: row["tag_value"] for row in result}
             else:
                 logger.warning(
-                    f"Table name '{table_name}' should be in format "
-                    f"'catalog.schema.table'"
+                    f"Table name '{table_name}' should be in format 'catalog.schema.table'"
                 )
                 return {}
         except Exception as e:
             logger.error(f"Failed to get tags from {table_name}: {e}")
             return {}
 
-    def _validate_column_tags(
-        self,
-        df: DataFrame,
-        column_tags: Dict[str, Dict[str, Any]]
-    ) -> None:
+    def _validate_column_tags(self, df: DataFrame, column_tags: dict[str, dict[str, Any]]) -> None:
         """Validate column tags according to GDPR rules."""
         for col_name, tags in column_tags.items():
             if col_name not in df.columns:
-                logger.warning(
-                    f"Column '{col_name}' does not exist in DataFrame"
-                )
+                logger.warning(f"Column '{col_name}' does not exist in DataFrame")
                 continue
 
             if "gdpr_category" in tags:
@@ -3349,8 +3168,7 @@ class MetadataManager:
                 if category not in self.GDPR_CATEGORIES:
                     valid_categories = list(self.GDPR_CATEGORIES.keys())
                     raise ValueError(
-                        f"Invalid GDPR category: {category}. "
-                        f"Use one of: {valid_categories}"
+                        f"Invalid GDPR category: {category}. Use one of: {valid_categories}"
                     )
 
             if "sensitivity" in tags:
@@ -3361,14 +3179,14 @@ class MetadataManager:
                         f"Use one of: {self.SENSITIVITY_LEVELS}"
                     )
 
-    def _validate_dataset_tags(self, dataset_tags: Dict[str, str]) -> None:
+    def _validate_dataset_tags(self, dataset_tags: dict[str, str]) -> None:
         """Validate dataset tags."""
         required_fields = ["owner", "purpose"]
-        for field in required_fields:
-            if field not in dataset_tags:
-                raise ValueError(f"Required tag missing: '{field}'")
+        for req_field in required_fields:
+            if req_field not in dataset_tags:
+                raise ValueError(f"Required tag missing: '{req_field}'")
 
-    def get_column_tags(self, df: DataFrame) -> Dict[str, Dict[str, str]]:
+    def get_column_tags(self, df: DataFrame) -> dict[str, dict[str, str]]:
         """
         Return GDPR tags applied to each column of the DataFrame.
 
@@ -3383,13 +3201,9 @@ class MetadataManager:
         for column in df.schema:
             if "gdpr_tags" in column.metadata:
                 try:
-                    result[column.name] = json.loads(
-                        column.metadata["gdpr_tags"]
-                    )
+                    result[column.name] = json.loads(column.metadata["gdpr_tags"])
                 except json.JSONDecodeError:
-                    logger.warning(
-                        f"Could not parse gdpr_tags for column {column.name}"
-                    )
+                    logger.warning(f"Could not parse gdpr_tags for column {column.name}")
                     result[column.name] = {"error": "invalid JSON"}
 
         return result
@@ -3406,9 +3220,7 @@ class RetentionManager:
     """
 
     def __init__(
-        self,
-        metadata_manager: MetadataManager,
-        audit_manager: Optional[AuditManager] = None
+        self, metadata_manager: MetadataManager, audit_manager: AuditManager | None = None
     ):
         """
         Initialize the retention manager.
@@ -3421,11 +3233,7 @@ class RetentionManager:
         self.spark = metadata_manager.spark
         self.audit = audit_manager
 
-    def apply_retention_policy(
-        self,
-        df: DataFrame,
-        date_column: str
-    ) -> DataFrame:
+    def apply_retention_policy(self, df: DataFrame, date_column: str) -> DataFrame:
         """
         Apply retention policies based on 'retention_days' tag in columns.
 
@@ -3439,9 +3247,7 @@ class RetentionManager:
         column_tags = self.metadata_manager.get_column_tags(df)
 
         if not column_tags:
-            logger.warning(
-                "No GDPR tags found. Cannot apply retention policy."
-            )
+            logger.warning("No GDPR tags found. Cannot apply retention policy.")
             return df
 
         # Find the maximum retention period
@@ -3452,9 +3258,7 @@ class RetentionManager:
                 if retention > max_retention_days:
                     max_retention_days = retention
             except (ValueError, TypeError):
-                logger.warning(
-                    f"Invalid 'retention_days' for column {col_name}"
-                )
+                logger.warning(f"Invalid 'retention_days' for column {col_name}")
 
         if max_retention_days <= 0:
             logger.info("No valid retention period found.")
@@ -3468,9 +3272,7 @@ class RetentionManager:
             datetime.datetime.now() - datetime.timedelta(days=max_retention_days)
         ).strftime("%Y-%m-%d")
 
-        logger.info(
-            f"Retention policy applied. Kept records >= {cutoff_date_str}"
-        )
+        logger.info(f"Retention policy applied. Kept records >= {cutoff_date_str}")
 
         # Log audit event
         if self.audit:
@@ -3482,8 +3284,8 @@ class RetentionManager:
                 details={
                     "date_column": date_column,
                     "max_retention_days": max_retention_days,
-                    "cutoff_date": cutoff_date_str
-                }
+                    "cutoff_date": cutoff_date_str,
+                },
             )
 
         return result_df
@@ -3500,9 +3302,7 @@ class AnonymizationManager:
     """
 
     def __init__(
-        self,
-        metadata_manager: MetadataManager,
-        audit_manager: Optional[AuditManager] = None
+        self, metadata_manager: MetadataManager, audit_manager: AuditManager | None = None
     ):
         """
         Initialize the anonymization manager.
@@ -3515,11 +3315,7 @@ class AnonymizationManager:
         self.spark = metadata_manager.spark
         self.audit = audit_manager
 
-    def mask_columns(
-        self,
-        df: DataFrame,
-        mask_rules: Dict[str, str]
-    ) -> DataFrame:
+    def mask_columns(self, df: DataFrame, mask_rules: dict[str, str]) -> DataFrame:
         """
         Apply masking to specific columns based on provided rules.
 
@@ -3548,9 +3344,7 @@ class AnonymizationManager:
                 mask_expressions[column] = F.sha2(col_ref, 256)
             elif mask_type == "partial":
                 mask_expressions[column] = F.concat_ws(
-                    "***",
-                    F.substring(col_ref, 1, 3),
-                    F.substring(col_ref, -3, 3)
+                    "***", F.substring(col_ref, 1, 3), F.substring(col_ref, -3, 3)
                 )
             elif mask_type == "redact":
                 mask_expressions[column] = F.lit("[REDACTED]")
@@ -3567,7 +3361,7 @@ class AnonymizationManager:
                     actor="anonymization_manager",
                     action="mask_columns",
                     resource="dataframe",
-                    details={"columns": list(mask_rules.keys())}
+                    details={"columns": list(mask_rules.keys())},
                 )
 
             return result
@@ -3575,10 +3369,7 @@ class AnonymizationManager:
         return df
 
     def pseudonymize_columns(
-        self,
-        df: DataFrame,
-        columns: List[str],
-        salt: Optional[str] = None
+        self, df: DataFrame, columns: list[str], salt: str | None = None
     ) -> DataFrame:
         """
         Pseudonymize columns maintaining the same relationship between values.
@@ -3596,9 +3387,7 @@ class AnonymizationManager:
 
         salt_value = salt or str(uuid.uuid4())
         if salt is None:
-            logger.warning(
-                "Using random salt. Output will not be consistent across runs."
-            )
+            logger.warning("Using random salt. Output will not be consistent across runs.")
 
         pseudo_expressions = {}
 
@@ -3608,8 +3397,7 @@ class AnonymizationManager:
                 continue
 
             pseudo_expressions[column] = F.sha2(
-                F.concat_ws(":", F.col(column).cast("string"), F.lit(salt_value)),
-                256
+                F.concat_ws(":", F.col(column).cast("string"), F.lit(salt_value)), 256
             )
 
         if pseudo_expressions:
@@ -3649,10 +3437,7 @@ class AnonymizationManager:
         return result_df
 
     def request_erasure(
-        self,
-        df: DataFrame,
-        identifier_col: str,
-        identifier_value: str
+        self, df: DataFrame, identifier_col: str, identifier_value: str
     ) -> DataFrame:
         """
         Handle data subject erasure requests.
@@ -3670,14 +3455,12 @@ class AnonymizationManager:
             logger.warning("No column tags found. Cannot perform erasure.")
             return df
 
-        logger.info(
-            f"Processing erasure request for {identifier_col} = {identifier_value}"
-        )
+        logger.info(f"Processing erasure request for {identifier_col} = {identifier_value}")
 
         columns_to_anonymize = [
-            col_name for col_name, tags in column_tags.items()
-            if tags.get("gdpr_category") in ["PII", "SPI"]
-            and col_name != identifier_col
+            col_name
+            for col_name, tags in column_tags.items()
+            if tags.get("gdpr_category") in ["PII", "SPI"] and col_name != identifier_col
         ]
 
         if not columns_to_anonymize:
@@ -3689,8 +3472,7 @@ class AnonymizationManager:
 
         for target_col in columns_to_anonymize:
             erasure_expressions[target_col] = F.when(
-                condition,
-                F.lit(None).cast(df.schema[target_col].dataType)
+                condition, F.lit(None).cast(df.schema[target_col].dataType)
             ).otherwise(F.col(target_col))
 
         if erasure_expressions:
@@ -3705,14 +3487,12 @@ class AnonymizationManager:
                     resource="dataframe",
                     details={
                         "identifier_col": identifier_col,
-                        "columns_erased": columns_to_anonymize
+                        "columns_erased": columns_to_anonymize,
                     },
-                    subject_ids=[identifier_value]
+                    subject_ids=[identifier_value],
                 )
 
-            logger.info(
-                f"Applied erasure to {len(erasure_expressions)} columns"
-            )
+            logger.info(f"Applied erasure to {len(erasure_expressions)} columns")
             return result_df
 
         return df
@@ -3733,11 +3513,7 @@ class BackendSelector:
     - SPARK: For large datasets (>500k rows) - distributed processing
     """
 
-    def __init__(
-        self,
-        spark: Optional[SparkSession] = None,
-        config: Optional[ConfigManager] = None
-    ):
+    def __init__(self, spark: SparkSession | None = None, config: ConfigManager | None = None):
         """
         Initialize the backend selector.
 
@@ -3759,8 +3535,8 @@ class BackendSelector:
     def get_backend(
         self,
         row_count: int,
-        force_backend: Optional[ProcessingBackend] = None,
-        prefer_polars: bool = True
+        force_backend: ProcessingBackend | None = None,
+        prefer_polars: bool = True,
     ) -> ProcessingBackend:
         """
         Determine the optimal backend based on data size.
@@ -3798,10 +3574,8 @@ class BackendSelector:
             return ProcessingBackend.SPARK
 
     def get_processor(
-        self,
-        row_count: int,
-        force_backend: Optional[ProcessingBackend] = None
-    ) -> Union['PandasProcessor', 'PolarsProcessor', None]:
+        self, row_count: int, force_backend: ProcessingBackend | None = None
+    ) -> Union["PandasProcessor", "PolarsProcessor", None]:
         """
         Get the appropriate processor instance based on data size.
 
@@ -3837,9 +3611,7 @@ class BackendSelector:
         return df.toPandas()
 
     def convert_pandas_to_spark(
-        self,
-        df: pd.DataFrame,
-        schema: Optional[StructType] = None
+        self, df: pd.DataFrame, schema: StructType | None = None
     ) -> DataFrame:
         """
         Convert Pandas DataFrame to Spark.
@@ -3877,9 +3649,7 @@ class BackendSelector:
         return pl.from_pandas(pandas_df)
 
     def convert_polars_to_spark(
-        self,
-        df: pl.DataFrame,
-        schema: Optional[StructType] = None
+        self, df: pl.DataFrame, schema: StructType | None = None
     ) -> DataFrame:
         """
         Convert Polars DataFrame to Spark.
@@ -3930,7 +3700,7 @@ class BackendSelector:
 
         return df.to_pandas()
 
-    def get_recommendation(self, row_count: int) -> Dict[str, Any]:
+    def get_recommendation(self, row_count: int) -> dict[str, Any]:
         """
         Get detailed backend recommendation with reasoning.
 
@@ -3946,21 +3716,21 @@ class BackendSelector:
             ProcessingBackend.PANDAS: {
                 "backend": "pandas",
                 "reason": f"Small dataset ({row_count:,} rows <= {self.pandas_threshold:,}). "
-                          "Pandas is sufficient with minimal overhead.",
-                "alternative": "polars" if POLARS_AVAILABLE else "spark"
+                "Pandas is sufficient with minimal overhead.",
+                "alternative": "polars" if POLARS_AVAILABLE else "spark",
             },
             ProcessingBackend.POLARS: {
                 "backend": "polars",
                 "reason": f"Medium dataset ({row_count:,} rows). "
-                          "Polars provides 5-10x speedup over Pandas with parallel processing.",
-                "alternative": "spark" if row_count > 100000 else "pandas"
+                "Polars provides 5-10x speedup over Pandas with parallel processing.",
+                "alternative": "spark" if row_count > 100000 else "pandas",
             },
             ProcessingBackend.SPARK: {
                 "backend": "spark",
                 "reason": f"Large dataset ({row_count:,} rows > {self.polars_threshold:,}). "
-                          "Spark distributed processing is recommended.",
-                "alternative": "polars" if POLARS_AVAILABLE else "pandas"
-            }
+                "Spark distributed processing is recommended.",
+                "alternative": "polars" if POLARS_AVAILABLE else "pandas",
+            },
         }
 
         return {
@@ -3970,8 +3740,8 @@ class BackendSelector:
             "available_backends": {
                 "pandas": PANDAS_AVAILABLE,
                 "polars": POLARS_AVAILABLE,
-                "spark": True
-            }
+                "spark": True,
+            },
         }
 
 
@@ -3995,9 +3765,9 @@ class ApacheAtlasClient:
     def __init__(
         self,
         atlas_url: str,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
-        config: Optional[ConfigManager] = None
+        username: str | None = None,
+        password: str | None = None,
+        config: ConfigManager | None = None,
     ):
         """
         Initialize the Apache Atlas client.
@@ -4008,17 +3778,17 @@ class ApacheAtlasClient:
             password: Atlas password (can be set via ATLAS_PASSWORD env var)
             config: ConfigManager for settings
         """
-        self.atlas_url = atlas_url.rstrip('/')
-        self.username = username or os.environ.get('ATLAS_USERNAME')
-        self.password = password or os.environ.get('ATLAS_PASSWORD')
+        self.atlas_url = atlas_url.rstrip("/")
+        self.username = username or os.environ.get("ATLAS_USERNAME")
+        self.password = password or os.environ.get("ATLAS_PASSWORD")
         self.config = config or ConfigManager()
         self._session = None
 
         # Atlas type definitions for GDPR
         self.GDPR_CLASSIFICATION_TYPES = {
-            'gdpr_pii': 'Personally Identifiable Information',
-            'gdpr_spi': 'Sensitive Personal Information',
-            'gdpr_npii': 'Non-Personally Identifiable Information'
+            "gdpr_pii": "Personally Identifiable Information",
+            "gdpr_spi": "Sensitive Personal Information",
+            "gdpr_npii": "Non-Personally Identifiable Information",
         }
 
     def _get_session(self):
@@ -4026,18 +3796,18 @@ class ApacheAtlasClient:
         if self._session is None:
             try:
                 import requests
+
                 self._session = requests.Session()
                 if self.username and self.password:
                     self._session.auth = (self.username, self.password)
-                self._session.headers.update({
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                })
-            except ImportError:
+                self._session.headers.update(
+                    {"Content-Type": "application/json", "Accept": "application/json"}
+                )
+            except ImportError as err:
                 raise ImportError(
                     "requests library required for Atlas integration. "
                     "Install with: pip install requests"
-                )
+                ) from err
         return self._session
 
     def test_connection(self) -> bool:
@@ -4055,7 +3825,7 @@ class ApacheAtlasClient:
             logger.error(f"Atlas connection test failed: {e}")
             return False
 
-    def create_gdpr_classification_types(self) -> Dict[str, Any]:
+    def create_gdpr_classification_types(self) -> dict[str, Any]:
         """
         Create GDPR classification types in Atlas if they don't exist.
 
@@ -4063,62 +3833,60 @@ class ApacheAtlasClient:
             Dictionary with creation results.
         """
         session = self._get_session()
-        results = {'created': [], 'existing': [], 'errors': []}
+        results = {"created": [], "existing": [], "errors": []}
 
         for type_name, description in self.GDPR_CLASSIFICATION_TYPES.items():
             classification_def = {
-                'classificationDefs': [{
-                    'name': type_name,
-                    'description': description,
-                    'superTypes': [],
-                    'attributeDefs': [
-                        {
-                            'name': 'sensitivity_level',
-                            'typeName': 'string',
-                            'isOptional': True,
-                            'cardinality': 'SINGLE',
-                            'valuesMinCount': 0,
-                            'valuesMaxCount': 1,
-                            'isUnique': False,
-                            'isIndexable': True
-                        },
-                        {
-                            'name': 'retention_days',
-                            'typeName': 'int',
-                            'isOptional': True,
-                            'cardinality': 'SINGLE',
-                            'valuesMinCount': 0,
-                            'valuesMaxCount': 1,
-                            'isUnique': False,
-                            'isIndexable': True
-                        },
-                        {
-                            'name': 'purpose',
-                            'typeName': 'string',
-                            'isOptional': True,
-                            'cardinality': 'SINGLE'
-                        }
-                    ]
-                }]
+                "classificationDefs": [
+                    {
+                        "name": type_name,
+                        "description": description,
+                        "superTypes": [],
+                        "attributeDefs": [
+                            {
+                                "name": "sensitivity_level",
+                                "typeName": "string",
+                                "isOptional": True,
+                                "cardinality": "SINGLE",
+                                "valuesMinCount": 0,
+                                "valuesMaxCount": 1,
+                                "isUnique": False,
+                                "isIndexable": True,
+                            },
+                            {
+                                "name": "retention_days",
+                                "typeName": "int",
+                                "isOptional": True,
+                                "cardinality": "SINGLE",
+                                "valuesMinCount": 0,
+                                "valuesMaxCount": 1,
+                                "isUnique": False,
+                                "isIndexable": True,
+                            },
+                            {
+                                "name": "purpose",
+                                "typeName": "string",
+                                "isOptional": True,
+                                "cardinality": "SINGLE",
+                            },
+                        ],
+                    }
+                ]
             }
 
             try:
                 response = session.post(
-                    f"{self.atlas_url}/api/atlas/v2/types/typedefs",
-                    json=classification_def
+                    f"{self.atlas_url}/api/atlas/v2/types/typedefs", json=classification_def
                 )
                 if response.status_code in [200, 201]:
-                    results['created'].append(type_name)
+                    results["created"].append(type_name)
                     logger.info(f"Created Atlas classification type: {type_name}")
                 elif response.status_code == 409:
-                    results['existing'].append(type_name)
+                    results["existing"].append(type_name)
                 else:
-                    results['errors'].append({
-                        'type': type_name,
-                        'error': response.text
-                    })
+                    results["errors"].append({"type": type_name, "error": response.text})
             except Exception as e:
-                results['errors'].append({'type': type_name, 'error': str(e)})
+                results["errors"].append({"type": type_name, "error": str(e)})
 
         return results
 
@@ -4126,7 +3894,7 @@ class ApacheAtlasClient:
         self,
         entity_guid: str,
         classification_name: str,
-        attributes: Optional[Dict[str, Any]] = None
+        attributes: dict[str, Any] | None = None,
     ) -> bool:
         """
         Apply a GDPR classification to an Atlas entity.
@@ -4141,15 +3909,12 @@ class ApacheAtlasClient:
         """
         session = self._get_session()
 
-        classification = {
-            'typeName': classification_name,
-            'attributes': attributes or {}
-        }
+        classification = {"typeName": classification_name, "attributes": attributes or {}}
 
         try:
             response = session.post(
                 f"{self.atlas_url}/api/atlas/v2/entity/guid/{entity_guid}/classifications",
-                json=[classification]
+                json=[classification],
             )
             if response.status_code in [200, 204]:
                 logger.info(f"Applied {classification_name} to entity {entity_guid}")
@@ -4164,9 +3929,9 @@ class ApacheAtlasClient:
     def sync_table_metadata(
         self,
         table_name: str,
-        column_tags: Dict[str, Dict[str, Any]],
-        qualified_name: Optional[str] = None
-    ) -> Dict[str, Any]:
+        column_tags: dict[str, dict[str, Any]],
+        qualified_name: str | None = None,
+    ) -> dict[str, Any]:
         """
         Sync GDPR metadata to Atlas for a table.
 
@@ -4179,34 +3944,33 @@ class ApacheAtlasClient:
             Sync results.
         """
         session = self._get_session()
-        results = {'table': table_name, 'synced_columns': [], 'errors': []}
+        results = {"table": table_name, "synced_columns": [], "errors": []}
 
         # Search for the table entity
         q_name = qualified_name or f"default.{table_name}@primary"
         search_query = {
-            'typeName': 'hive_table',
-            'excludeDeletedEntities': True,
-            'query': q_name,
-            'limit': 1
+            "typeName": "hive_table",
+            "excludeDeletedEntities": True,
+            "query": q_name,
+            "limit": 1,
         }
 
         try:
             response = session.post(
-                f"{self.atlas_url}/api/atlas/v2/search/basic",
-                json=search_query
+                f"{self.atlas_url}/api/atlas/v2/search/basic", json=search_query
             )
 
             if response.status_code != 200:
-                results['errors'].append(f"Table search failed: {response.text}")
+                results["errors"].append(f"Table search failed: {response.text}")
                 return results
 
             search_results = response.json()
-            if not search_results.get('entities'):
-                results['errors'].append(f"Table {table_name} not found in Atlas")
+            if not search_results.get("entities"):
+                results["errors"].append(f"Table {table_name} not found in Atlas")
                 return results
 
-            table_entity = search_results['entities'][0]
-            table_guid = table_entity['guid']
+            table_entity = search_results["entities"][0]
+            table_guid = table_entity["guid"]
 
             # Get table details including columns
             entity_response = session.get(
@@ -4214,17 +3978,17 @@ class ApacheAtlasClient:
             )
 
             if entity_response.status_code != 200:
-                results['errors'].append(f"Failed to get table details: {entity_response.text}")
+                results["errors"].append(f"Failed to get table details: {entity_response.text}")
                 return results
 
             entity_data = entity_response.json()
-            columns = entity_data.get('referredEntities', {})
+            columns = entity_data.get("referredEntities", {})
 
             # Map column names to GUIDs
             column_guids = {}
             for guid, col_entity in columns.items():
-                if col_entity.get('typeName') == 'hive_column':
-                    col_name = col_entity.get('attributes', {}).get('name')
+                if col_entity.get("typeName") == "hive_column":
+                    col_name = col_entity.get("attributes", {}).get("name")
                     if col_name:
                         column_guids[col_name] = guid
 
@@ -4234,41 +3998,37 @@ class ApacheAtlasClient:
                     continue
 
                 col_guid = column_guids[col_name]
-                gdpr_category = tags.get('gdpr_category', '').upper()
+                gdpr_category = tags.get("gdpr_category", "").upper()
 
                 # Map to Atlas classification
-                classification_map = {
-                    'PII': 'gdpr_pii',
-                    'SPI': 'gdpr_spi',
-                    'NPII': 'gdpr_npii'
-                }
+                classification_map = {"PII": "gdpr_pii", "SPI": "gdpr_spi", "NPII": "gdpr_npii"}
 
                 if gdpr_category in classification_map:
                     classification = classification_map[gdpr_category]
                     attrs = {
-                        'sensitivity_level': tags.get('sensitivity', 'MEDIUM'),
-                        'retention_days': tags.get('retention_days', 365),
-                        'purpose': tags.get('purpose', '')
+                        "sensitivity_level": tags.get("sensitivity", "MEDIUM"),
+                        "retention_days": tags.get("retention_days", 365),
+                        "purpose": tags.get("purpose", ""),
                     }
 
                     if self.apply_classification_to_entity(col_guid, classification, attrs):
-                        results['synced_columns'].append(col_name)
+                        results["synced_columns"].append(col_name)
                     else:
-                        results['errors'].append(f"Failed to sync {col_name}")
+                        results["errors"].append(f"Failed to sync {col_name}")
 
-            logger.info(f"Atlas sync complete for {table_name}: {len(results['synced_columns'])} columns")
+            logger.info(
+                f"Atlas sync complete for {table_name}: {len(results['synced_columns'])} columns"
+            )
 
         except Exception as e:
-            results['errors'].append(str(e))
+            results["errors"].append(str(e))
             logger.error(f"Atlas sync error: {e}")
 
         return results
 
     def get_classified_entities(
-        self,
-        classification_name: str,
-        limit: int = 100
-    ) -> List[Dict[str, Any]]:
+        self, classification_name: str, limit: int = 100
+    ) -> list[dict[str, Any]]:
         """
         Get all entities with a specific GDPR classification.
 
@@ -4284,15 +4044,12 @@ class ApacheAtlasClient:
         try:
             response = session.get(
                 f"{self.atlas_url}/api/atlas/v2/search/basic",
-                params={
-                    'classification': classification_name,
-                    'limit': limit
-                }
+                params={"classification": classification_name, "limit": limit},
             )
 
             if response.status_code == 200:
                 data = response.json()
-                return data.get('entities', [])
+                return data.get("entities", [])
             else:
                 logger.error(f"Classification search failed: {response.text}")
                 return []
@@ -4301,11 +4058,8 @@ class ApacheAtlasClient:
             return []
 
     def generate_gdpr_lineage_report(
-        self,
-        entity_guid: str,
-        direction: str = "BOTH",
-        depth: int = 3
-    ) -> Dict[str, Any]:
+        self, entity_guid: str, direction: str = "BOTH", depth: int = 3
+    ) -> dict[str, Any]:
         """
         Generate a GDPR lineage report for an entity.
 
@@ -4322,43 +4076,44 @@ class ApacheAtlasClient:
         try:
             response = session.get(
                 f"{self.atlas_url}/api/atlas/v2/lineage/{entity_guid}",
-                params={'direction': direction, 'depth': depth}
+                params={"direction": direction, "depth": depth},
             )
 
             if response.status_code != 200:
-                return {'error': response.text}
+                return {"error": response.text}
 
             lineage_data = response.json()
 
             # Enrich with GDPR classifications
             report = {
-                'base_entity': entity_guid,
-                'lineage_depth': depth,
-                'gdpr_entities': [],
-                'relations': lineage_data.get('relations', [])
+                "base_entity": entity_guid,
+                "lineage_depth": depth,
+                "gdpr_entities": [],
+                "relations": lineage_data.get("relations", []),
             }
 
             # Check each entity for GDPR classifications
-            for guid, entity in lineage_data.get('guidEntityMap', {}).items():
-                classifications = entity.get('classifications', [])
+            for guid, entity in lineage_data.get("guidEntityMap", {}).items():
+                classifications = entity.get("classifications", [])
                 gdpr_classes = [
-                    c for c in classifications
-                    if c.get('typeName', '').startswith('gdpr_')
+                    c for c in classifications if c.get("typeName", "").startswith("gdpr_")
                 ]
 
                 if gdpr_classes:
-                    report['gdpr_entities'].append({
-                        'guid': guid,
-                        'name': entity.get('attributes', {}).get('name'),
-                        'type': entity.get('typeName'),
-                        'gdpr_classifications': gdpr_classes
-                    })
+                    report["gdpr_entities"].append(
+                        {
+                            "guid": guid,
+                            "name": entity.get("attributes", {}).get("name"),
+                            "type": entity.get("typeName"),
+                            "gdpr_classifications": gdpr_classes,
+                        }
+                    )
 
             return report
 
         except Exception as e:
             logger.error(f"Lineage report error: {e}")
-            return {'error': str(e)}
+            return {"error": str(e)}
 
 
 # ==============================================================================
@@ -4379,9 +4134,9 @@ class AWSGlueCatalogClient:
 
     def __init__(
         self,
-        region_name: Optional[str] = None,
-        database_name: Optional[str] = None,
-        config: Optional[ConfigManager] = None
+        region_name: str | None = None,
+        database_name: str | None = None,
+        config: ConfigManager | None = None,
     ):
         """
         Initialize the AWS Glue Catalog client.
@@ -4391,20 +4146,20 @@ class AWSGlueCatalogClient:
             database_name: Default Glue database name.
             config: ConfigManager for settings.
         """
-        self.region_name = region_name or os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
-        self.database_name = database_name or 'default'
+        self.region_name = region_name or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+        self.database_name = database_name or "default"
         self.config = config or ConfigManager()
         self._glue_client = None
         self._lakeformation_client = None
 
         # GDPR tag keys
-        self.TAG_PREFIX = 'gdpr:'
+        self.TAG_PREFIX = "gdpr:"
         self.GDPR_TAGS = {
-            'category': f'{self.TAG_PREFIX}category',
-            'sensitivity': f'{self.TAG_PREFIX}sensitivity',
-            'retention_days': f'{self.TAG_PREFIX}retention_days',
-            'purpose': f'{self.TAG_PREFIX}purpose',
-            'pii': f'{self.TAG_PREFIX}pii'
+            "category": f"{self.TAG_PREFIX}category",
+            "sensitivity": f"{self.TAG_PREFIX}sensitivity",
+            "retention_days": f"{self.TAG_PREFIX}retention_days",
+            "purpose": f"{self.TAG_PREFIX}purpose",
+            "pii": f"{self.TAG_PREFIX}pii",
         }
 
     def _get_glue_client(self):
@@ -4412,12 +4167,12 @@ class AWSGlueCatalogClient:
         if self._glue_client is None:
             try:
                 import boto3
-                self._glue_client = boto3.client('glue', region_name=self.region_name)
-            except ImportError:
+
+                self._glue_client = boto3.client("glue", region_name=self.region_name)
+            except ImportError as err:
                 raise ImportError(
-                    "boto3 required for AWS Glue integration. "
-                    "Install with: pip install boto3"
-                )
+                    "boto3 required for AWS Glue integration. Install with: pip install boto3"
+                ) from err
         return self._glue_client
 
     def _get_lakeformation_client(self):
@@ -4425,12 +4180,12 @@ class AWSGlueCatalogClient:
         if self._lakeformation_client is None:
             try:
                 import boto3
+
                 self._lakeformation_client = boto3.client(
-                    'lakeformation',
-                    region_name=self.region_name
+                    "lakeformation", region_name=self.region_name
                 )
-            except ImportError:
-                raise ImportError("boto3 required for Lake Formation integration")
+            except ImportError as err:
+                raise ImportError("boto3 required for Lake Formation integration") from err
         return self._lakeformation_client
 
     def test_connection(self) -> bool:
@@ -4449,10 +4204,7 @@ class AWSGlueCatalogClient:
             return False
 
     def apply_table_tags(
-        self,
-        table_name: str,
-        tags: Dict[str, str],
-        database_name: Optional[str] = None
+        self, table_name: str, tags: dict[str, str], database_name: str | None = None
     ) -> bool:
         """
         Apply GDPR tags to a Glue table.
@@ -4477,28 +4229,25 @@ class AWSGlueCatalogClient:
         try:
             # Get current table
             response = client.get_table(DatabaseName=db_name, Name=table_name)
-            table = response['Table']
+            table = response["Table"]
 
             # Merge with existing parameters
-            params = table.get('Parameters', {})
+            params = table.get("Parameters", {})
             params.update(glue_tags)
 
             # Update table
             table_input = {
-                'Name': table_name,
-                'StorageDescriptor': table['StorageDescriptor'],
-                'Parameters': params
+                "Name": table_name,
+                "StorageDescriptor": table["StorageDescriptor"],
+                "Parameters": params,
             }
 
-            if 'PartitionKeys' in table:
-                table_input['PartitionKeys'] = table['PartitionKeys']
-            if 'TableType' in table:
-                table_input['TableType'] = table['TableType']
+            if "PartitionKeys" in table:
+                table_input["PartitionKeys"] = table["PartitionKeys"]
+            if "TableType" in table:
+                table_input["TableType"] = table["TableType"]
 
-            client.update_table(
-                DatabaseName=db_name,
-                TableInput=table_input
-            )
+            client.update_table(DatabaseName=db_name, TableInput=table_input)
 
             logger.info(f"Applied GDPR tags to Glue table {db_name}.{table_name}")
             return True
@@ -4510,9 +4259,9 @@ class AWSGlueCatalogClient:
     def apply_column_tags(
         self,
         table_name: str,
-        column_tags: Dict[str, Dict[str, Any]],
-        database_name: Optional[str] = None
-    ) -> Dict[str, Any]:
+        column_tags: dict[str, dict[str, Any]],
+        database_name: str | None = None,
+    ) -> dict[str, Any]:
         """
         Apply GDPR tags to columns using column comments and Lake Formation.
 
@@ -4526,58 +4275,56 @@ class AWSGlueCatalogClient:
         """
         client = self._get_glue_client()
         db_name = database_name or self.database_name
-        results = {'updated_columns': [], 'errors': []}
+        results = {"updated_columns": [], "errors": []}
 
         try:
             # Get current table
             response = client.get_table(DatabaseName=db_name, Name=table_name)
-            table = response['Table']
-            storage_descriptor = table['StorageDescriptor']
-            columns = storage_descriptor.get('Columns', [])
+            table = response["Table"]
+            storage_descriptor = table["StorageDescriptor"]
+            columns = storage_descriptor.get("Columns", [])
 
             # Update column comments with GDPR metadata
             for i, col in enumerate(columns):
-                col_name = col['Name']
+                col_name = col["Name"]
                 if col_name in column_tags:
                     tags = column_tags[col_name]
 
                     # Store GDPR metadata in comment as JSON
-                    gdpr_comment = json.dumps({
-                        'gdpr_category': tags.get('gdpr_category'),
-                        'sensitivity': tags.get('sensitivity'),
-                        'retention_days': tags.get('retention_days'),
-                        'purpose': tags.get('purpose')
-                    })
+                    gdpr_comment = json.dumps(
+                        {
+                            "gdpr_category": tags.get("gdpr_category"),
+                            "sensitivity": tags.get("sensitivity"),
+                            "retention_days": tags.get("retention_days"),
+                            "purpose": tags.get("purpose"),
+                        }
+                    )
 
-                    columns[i]['Comment'] = gdpr_comment
-                    results['updated_columns'].append(col_name)
+                    columns[i]["Comment"] = gdpr_comment
+                    results["updated_columns"].append(col_name)
 
             # Update the table
-            storage_descriptor['Columns'] = columns
+            storage_descriptor["Columns"] = columns
 
             table_input = {
-                'Name': table_name,
-                'StorageDescriptor': storage_descriptor,
-                'Parameters': table.get('Parameters', {})
+                "Name": table_name,
+                "StorageDescriptor": storage_descriptor,
+                "Parameters": table.get("Parameters", {}),
             }
 
-            if 'PartitionKeys' in table:
-                table_input['PartitionKeys'] = table['PartitionKeys']
-            if 'TableType' in table:
-                table_input['TableType'] = table['TableType']
+            if "PartitionKeys" in table:
+                table_input["PartitionKeys"] = table["PartitionKeys"]
+            if "TableType" in table:
+                table_input["TableType"] = table["TableType"]
 
-            client.update_table(
-                DatabaseName=db_name,
-                TableInput=table_input
-            )
+            client.update_table(DatabaseName=db_name, TableInput=table_input)
 
             logger.info(
-                f"Updated {len(results['updated_columns'])} columns in "
-                f"{db_name}.{table_name}"
+                f"Updated {len(results['updated_columns'])} columns in {db_name}.{table_name}"
             )
 
         except Exception as e:
-            results['errors'].append(str(e))
+            results["errors"].append(str(e))
             logger.error(f"Failed to apply column tags: {e}")
 
         return results
@@ -4585,10 +4332,10 @@ class AWSGlueCatalogClient:
     def apply_lakeformation_tags(
         self,
         table_name: str,
-        column_tags: Dict[str, Dict[str, Any]],
-        database_name: Optional[str] = None,
-        catalog_id: Optional[str] = None
-    ) -> Dict[str, Any]:
+        column_tags: dict[str, dict[str, Any]],
+        database_name: str | None = None,
+        catalog_id: str | None = None,
+    ) -> dict[str, Any]:
         """
         Apply Lake Formation LF-Tags for fine-grained access control.
 
@@ -4603,7 +4350,7 @@ class AWSGlueCatalogClient:
         """
         lf_client = self._get_lakeformation_client()
         db_name = database_name or self.database_name
-        results = {'tagged_resources': [], 'errors': []}
+        results = {"tagged_resources": [], "errors": []}
 
         try:
             # First, ensure LF-Tags exist
@@ -4613,78 +4360,65 @@ class AWSGlueCatalogClient:
             for col_name, tags in column_tags.items():
                 lf_tags = []
 
-                if 'gdpr_category' in tags:
-                    lf_tags.append({
-                        'TagKey': 'gdpr_category',
-                        'TagValues': [tags['gdpr_category']]
-                    })
+                if "gdpr_category" in tags:
+                    lf_tags.append(
+                        {"TagKey": "gdpr_category", "TagValues": [tags["gdpr_category"]]}
+                    )
 
-                if 'sensitivity' in tags:
-                    lf_tags.append({
-                        'TagKey': 'gdpr_sensitivity',
-                        'TagValues': [tags['sensitivity']]
-                    })
+                if "sensitivity" in tags:
+                    lf_tags.append(
+                        {"TagKey": "gdpr_sensitivity", "TagValues": [tags["sensitivity"]]}
+                    )
 
                 if lf_tags:
                     resource = {
-                        'Table': {
-                            'DatabaseName': db_name,
-                            'Name': table_name,
-                            'ColumnNames': [col_name]
+                        "Table": {
+                            "DatabaseName": db_name,
+                            "Name": table_name,
+                            "ColumnNames": [col_name],
                         }
                     }
 
                     if catalog_id:
-                        resource['Table']['CatalogId'] = catalog_id
+                        resource["Table"]["CatalogId"] = catalog_id
 
                     try:
-                        lf_client.add_lf_tags_to_resource(
-                            Resource=resource,
-                            LFTags=lf_tags
-                        )
-                        results['tagged_resources'].append(col_name)
+                        lf_client.add_lf_tags_to_resource(Resource=resource, LFTags=lf_tags)
+                        results["tagged_resources"].append(col_name)
                     except Exception as e:
-                        results['errors'].append(f"{col_name}: {e}")
+                        results["errors"].append(f"{col_name}: {e}")
 
             logger.info(
-                f"Applied Lake Formation tags to "
-                f"{len(results['tagged_resources'])} columns"
+                f"Applied Lake Formation tags to {len(results['tagged_resources'])} columns"
             )
 
         except Exception as e:
-            results['errors'].append(str(e))
+            results["errors"].append(str(e))
             logger.error(f"Lake Formation tagging error: {e}")
 
         return results
 
-    def _ensure_lf_tags_exist(
-        self,
-        lf_client,
-        catalog_id: Optional[str] = None
-    ) -> None:
+    def _ensure_lf_tags_exist(self, lf_client, catalog_id: str | None = None) -> None:
         """Ensure required LF-Tags exist in Lake Formation."""
         required_tags = {
-            'gdpr_category': ['PII', 'SPI', 'NPII'],
-            'gdpr_sensitivity': ['LOW', 'MEDIUM', 'HIGH', 'VERY_HIGH']
+            "gdpr_category": ["PII", "SPI", "NPII"],
+            "gdpr_sensitivity": ["LOW", "MEDIUM", "HIGH", "VERY_HIGH"],
         }
 
         for tag_key, tag_values in required_tags.items():
             try:
-                params = {'TagKey': tag_key, 'TagValues': tag_values}
+                params = {"TagKey": tag_key, "TagValues": tag_values}
                 if catalog_id:
-                    params['CatalogId'] = catalog_id
+                    params["CatalogId"] = catalog_id
 
                 lf_client.create_lf_tag(**params)
                 logger.info(f"Created LF-Tag: {tag_key}")
             except Exception as e:
                 # Tag might already exist
-                if 'AlreadyExistsException' not in str(e):
+                if "AlreadyExistsException" not in str(e):
                     logger.warning(f"Could not create LF-Tag {tag_key}: {e}")
 
-    def get_gdpr_tables(
-        self,
-        database_name: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+    def get_gdpr_tables(self, database_name: str | None = None) -> list[dict[str, Any]]:
         """
         Get all tables with GDPR tags.
 
@@ -4699,60 +4433,49 @@ class AWSGlueCatalogClient:
         gdpr_tables = []
 
         try:
-            paginator = client.get_paginator('get_tables')
+            paginator = client.get_paginator("get_tables")
 
             for page in paginator.paginate(DatabaseName=db_name):
-                for table in page.get('TableList', []):
-                    params = table.get('Parameters', {})
+                for table in page.get("TableList", []):
+                    params = table.get("Parameters", {})
 
                     # Check for GDPR tags
-                    gdpr_params = {
-                        k: v for k, v in params.items()
-                        if k.startswith(self.TAG_PREFIX)
-                    }
+                    gdpr_params = {k: v for k, v in params.items() if k.startswith(self.TAG_PREFIX)}
 
                     if gdpr_params:
-                        gdpr_tables.append({
-                            'database': db_name,
-                            'table': table['Name'],
-                            'gdpr_tags': gdpr_params,
-                            'columns': self._extract_column_gdpr_info(
-                                table.get('StorageDescriptor', {}).get('Columns', [])
-                            )
-                        })
+                        gdpr_tables.append(
+                            {
+                                "database": db_name,
+                                "table": table["Name"],
+                                "gdpr_tags": gdpr_params,
+                                "columns": self._extract_column_gdpr_info(
+                                    table.get("StorageDescriptor", {}).get("Columns", [])
+                                ),
+                            }
+                        )
 
         except Exception as e:
             logger.error(f"Error getting GDPR tables: {e}")
 
         return gdpr_tables
 
-    def _extract_column_gdpr_info(
-        self,
-        columns: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+    def _extract_column_gdpr_info(self, columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Extract GDPR info from column comments."""
         gdpr_columns = []
 
         for col in columns:
-            comment = col.get('Comment', '')
+            comment = col.get("Comment", "")
             if comment:
                 try:
                     gdpr_info = json.loads(comment)
-                    if any(k.startswith('gdpr') for k in gdpr_info.keys()):
-                        gdpr_columns.append({
-                            'name': col['Name'],
-                            'type': col['Type'],
-                            **gdpr_info
-                        })
+                    if any(k.startswith("gdpr") for k in gdpr_info):
+                        gdpr_columns.append({"name": col["Name"], "type": col["Type"], **gdpr_info})
                 except json.JSONDecodeError:
                     pass
 
         return gdpr_columns
 
-    def generate_compliance_report(
-        self,
-        database_name: Optional[str] = None
-    ) -> Dict[str, Any]:
+    def generate_compliance_report(self, database_name: str | None = None) -> dict[str, Any]:
         """
         Generate a GDPR compliance report for a database.
 
@@ -4766,41 +4489,41 @@ class AWSGlueCatalogClient:
         gdpr_tables = self.get_gdpr_tables(db_name)
 
         report = {
-            'database': db_name,
-            'generated_at': datetime.datetime.now().isoformat(),
-            'summary': {
-                'total_tables': len(gdpr_tables),
-                'tables_with_pii': 0,
-                'tables_with_spi': 0,
-                'total_pii_columns': 0,
-                'total_spi_columns': 0
+            "database": db_name,
+            "generated_at": datetime.datetime.now().isoformat(),
+            "summary": {
+                "total_tables": len(gdpr_tables),
+                "tables_with_pii": 0,
+                "tables_with_spi": 0,
+                "total_pii_columns": 0,
+                "total_spi_columns": 0,
             },
-            'tables': []
+            "tables": [],
         }
 
         for table in gdpr_tables:
             table_summary = {
-                'name': table['table'],
-                'gdpr_tags': table['gdpr_tags'],
-                'pii_columns': [],
-                'spi_columns': []
+                "name": table["table"],
+                "gdpr_tags": table["gdpr_tags"],
+                "pii_columns": [],
+                "spi_columns": [],
             }
 
-            for col in table.get('columns', []):
-                category = col.get('gdpr_category', '')
-                if category == 'PII':
-                    table_summary['pii_columns'].append(col['name'])
-                    report['summary']['total_pii_columns'] += 1
-                elif category == 'SPI':
-                    table_summary['spi_columns'].append(col['name'])
-                    report['summary']['total_spi_columns'] += 1
+            for col in table.get("columns", []):
+                category = col.get("gdpr_category", "")
+                if category == "PII":
+                    table_summary["pii_columns"].append(col["name"])
+                    report["summary"]["total_pii_columns"] += 1
+                elif category == "SPI":
+                    table_summary["spi_columns"].append(col["name"])
+                    report["summary"]["total_spi_columns"] += 1
 
-            if table_summary['pii_columns']:
-                report['summary']['tables_with_pii'] += 1
-            if table_summary['spi_columns']:
-                report['summary']['tables_with_spi'] += 1
+            if table_summary["pii_columns"]:
+                report["summary"]["tables_with_pii"] += 1
+            if table_summary["spi_columns"]:
+                report["summary"]["tables_with_spi"] += 1
 
-            report['tables'].append(table_summary)
+            report["tables"].append(table_summary)
 
         return report
 
@@ -4829,23 +4552,19 @@ class MLPIIDetector:
 
     # Entity types that indicate PII
     PII_ENTITY_TYPES = {
-        'PERSON': 'PII',           # Person names
-        'ORG': 'NPII',             # Organizations (context-dependent)
-        'GPE': 'PII',              # Geo-political entities (addresses)
-        'LOC': 'PII',              # Locations
-        'DATE': 'PII',             # Dates (birth dates)
-        'EMAIL': 'PII',            # Email addresses
-        'PHONE': 'PII',            # Phone numbers
-        'MONEY': 'SPI',            # Financial info
-        'CARDINAL': 'NPII',        # Numbers
-        'NORP': 'SPI',             # Nationalities, religious/political groups
+        "PERSON": "PII",  # Person names
+        "ORG": "NPII",  # Organizations (context-dependent)
+        "GPE": "PII",  # Geo-political entities (addresses)
+        "LOC": "PII",  # Locations
+        "DATE": "PII",  # Dates (birth dates)
+        "EMAIL": "PII",  # Email addresses
+        "PHONE": "PII",  # Phone numbers
+        "MONEY": "SPI",  # Financial info
+        "CARDINAL": "NPII",  # Numbers
+        "NORP": "SPI",  # Nationalities, religious/political groups
     }
 
-    def __init__(
-        self,
-        config: Optional[ConfigManager] = None,
-        backend: str = 'auto'
-    ):
+    def __init__(self, config: ConfigManager | None = None, backend: str = "auto"):
         """
         Initialize ML PII detector.
 
@@ -4875,27 +4594,25 @@ class MLPIIDetector:
 
         selected_backend = self.backend
 
-        if selected_backend == 'auto':
+        if selected_backend == "auto":
             # Try backends in order of preference
             if self._try_init_spacy():
-                selected_backend = 'spacy'
+                selected_backend = "spacy"
             elif self._try_init_transformers():
-                selected_backend = 'transformers'
+                selected_backend = "transformers"
             else:
-                selected_backend = 'regex'
+                selected_backend = "regex"
                 logger.info("Using regex-based PII detection (no ML backend available)")
-        elif selected_backend == 'spacy':
+        elif selected_backend == "spacy":
             if not self._try_init_spacy():
                 raise ImportError(
                     "spaCy not available. Install with: "
                     "pip install spacy && python -m spacy download en_core_web_sm"
                 )
-        elif selected_backend == 'transformers':
-            if not self._try_init_transformers():
-                raise ImportError(
-                    "Transformers not available. Install with: "
-                    "pip install transformers torch"
-                )
+        elif selected_backend == "transformers" and not self._try_init_transformers():
+            raise ImportError(
+                "Transformers not available. Install with: pip install transformers torch"
+            )
 
         self._initialized = True
         self.backend = selected_backend
@@ -4907,7 +4624,7 @@ class MLPIIDetector:
             import spacy
 
             # Try different model sizes
-            for model in ['en_core_web_sm', 'en_core_web_md', 'en_core_web_lg']:
+            for model in ["en_core_web_sm", "en_core_web_md", "en_core_web_lg"]:
                 try:
                     self._nlp = spacy.load(model)
                     logger.info(f"Loaded spaCy model: {model}")
@@ -4925,20 +4642,14 @@ class MLPIIDetector:
             from transformers import pipeline
 
             self._transformer_pipeline = pipeline(
-                "ner",
-                model="dslim/bert-base-NER",
-                aggregation_strategy="simple"
+                "ner", model="dslim/bert-base-NER", aggregation_strategy="simple"
             )
             logger.info("Loaded transformers NER pipeline")
             return True
         except Exception:
             return False
 
-    def detect_pii_in_text(
-        self,
-        text: str,
-        include_patterns: bool = True
-    ) -> Dict[str, Any]:
+    def detect_pii_in_text(self, text: str, include_patterns: bool = True) -> dict[str, Any]:
         """
         Detect PII in a text string.
 
@@ -4952,90 +4663,89 @@ class MLPIIDetector:
         backend = self._initialize_backend()
 
         results = {
-            'text_length': len(text),
-            'backend_used': backend,
-            'entities': [],
-            'pattern_matches': {},
-            'pii_detected': False,
-            'spi_detected': False
+            "text_length": len(text),
+            "backend_used": backend,
+            "entities": [],
+            "pattern_matches": {},
+            "pii_detected": False,
+            "spi_detected": False,
         }
 
         # ML-based detection
-        if backend == 'spacy':
-            results['entities'] = self._detect_with_spacy(text)
-        elif backend == 'transformers':
-            results['entities'] = self._detect_with_transformers(text)
+        if backend == "spacy":
+            results["entities"] = self._detect_with_spacy(text)
+        elif backend == "transformers":
+            results["entities"] = self._detect_with_transformers(text)
 
         # Pattern-based detection
         if include_patterns:
-            results['pattern_matches'] = self._detect_patterns(text)
+            results["pattern_matches"] = self._detect_patterns(text)
 
         # Classify results
-        for entity in results['entities']:
-            gdpr_category = self.PII_ENTITY_TYPES.get(entity['type'], 'UNKNOWN')
-            entity['gdpr_category'] = gdpr_category
+        for entity in results["entities"]:
+            gdpr_category = self.PII_ENTITY_TYPES.get(entity["type"], "UNKNOWN")
+            entity["gdpr_category"] = gdpr_category
 
-            if gdpr_category == 'PII':
-                results['pii_detected'] = True
-            elif gdpr_category == 'SPI':
-                results['spi_detected'] = True
+            if gdpr_category == "PII":
+                results["pii_detected"] = True
+            elif gdpr_category == "SPI":
+                results["spi_detected"] = True
 
         # Check pattern matches
-        for pattern_type, matches in results['pattern_matches'].items():
+        for _pattern_type, matches in results["pattern_matches"].items():
             if matches:
-                results['pii_detected'] = True
+                results["pii_detected"] = True
 
         return results
 
-    def _detect_with_spacy(self, text: str) -> List[Dict[str, Any]]:
+    def _detect_with_spacy(self, text: str) -> list[dict[str, Any]]:
         """Detect entities using spaCy."""
         entities = []
 
         doc = self._nlp(text)
         for ent in doc.ents:
-            entities.append({
-                'text': ent.text,
-                'type': ent.label_,
-                'start': ent.start_char,
-                'end': ent.end_char,
-                'confidence': 0.85  # spaCy doesn't provide confidence scores
-            })
+            entities.append(
+                {
+                    "text": ent.text,
+                    "type": ent.label_,
+                    "start": ent.start_char,
+                    "end": ent.end_char,
+                    "confidence": 0.85,  # spaCy doesn't provide confidence scores
+                }
+            )
 
         return entities
 
-    def _detect_with_transformers(self, text: str) -> List[Dict[str, Any]]:
+    def _detect_with_transformers(self, text: str) -> list[dict[str, Any]]:
         """Detect entities using transformers."""
         entities = []
 
         # Transformers entity mapping
-        type_mapping = {
-            'PER': 'PERSON',
-            'LOC': 'LOC',
-            'ORG': 'ORG',
-            'MISC': 'MISC'
-        }
+        type_mapping = {"PER": "PERSON", "LOC": "LOC", "ORG": "ORG", "MISC": "MISC"}
 
         results = self._transformer_pipeline(text)
         for ent in results:
-            entity_type = ent.get('entity_group', 'UNKNOWN')
+            entity_type = ent.get("entity_group", "UNKNOWN")
             mapped_type = type_mapping.get(entity_type, entity_type)
 
-            if ent.get('score', 0) >= self.min_confidence:
-                entities.append({
-                    'text': ent['word'],
-                    'type': mapped_type,
-                    'start': ent['start'],
-                    'end': ent['end'],
-                    'confidence': ent['score']
-                })
+            if ent.get("score", 0) >= self.min_confidence:
+                entities.append(
+                    {
+                        "text": ent["word"],
+                        "type": mapped_type,
+                        "start": ent["start"],
+                        "end": ent["end"],
+                        "confidence": ent["score"],
+                    }
+                )
 
         return entities
 
-    def _detect_patterns(self, text: str) -> Dict[str, List[str]]:
+    def _detect_patterns(self, text: str) -> dict[str, list[str]]:
         """Detect PII using regex patterns."""
         matches = {}
 
-        patterns = self.config.get('pii_detection', 'patterns', default={})
+        patterns = self.config.get("pii_detection", "patterns", default={})
         patterns.update(self._custom_patterns)
 
         for pattern_name, pattern in patterns.items():
@@ -5046,11 +4756,8 @@ class MLPIIDetector:
         return matches
 
     def scan_dataframe_content(
-        self,
-        df: DataFrame,
-        columns: Optional[List[str]] = None,
-        sample_size: int = 100
-    ) -> Dict[str, Any]:
+        self, df: DataFrame, columns: list[str] | None = None, sample_size: int = 100
+    ) -> dict[str, Any]:
         """
         Scan DataFrame content for PII using ML detection.
 
@@ -5063,18 +4770,15 @@ class MLPIIDetector:
             Scan results by column.
         """
         results = {
-            'scan_type': 'ml_content_scan',
-            'sample_size': sample_size,
-            'backend': self._initialize_backend(),
-            'columns': {}
+            "scan_type": "ml_content_scan",
+            "sample_size": sample_size,
+            "backend": self._initialize_backend(),
+            "columns": {},
         }
 
         # Determine columns to scan
         if columns is None:
-            columns = [
-                f.name for f in df.schema.fields
-                if str(f.dataType) == 'StringType'
-            ]
+            columns = [f.name for f in df.schema.fields if str(f.dataType) == "StringType"]
 
         # Sample data
         sample_df = df.limit(sample_size)
@@ -5084,11 +4788,11 @@ class MLPIIDetector:
                 continue
 
             col_results = {
-                'total_entities': 0,
-                'entity_types': {},
-                'pii_detected': False,
-                'spi_detected': False,
-                'sample_entities': []
+                "total_entities": 0,
+                "entity_types": {},
+                "pii_detected": False,
+                "spi_detected": False,
+                "sample_entities": [],
             }
 
             # Get column values
@@ -5101,30 +4805,27 @@ class MLPIIDetector:
 
                 detection = self.detect_pii_in_text(str(value))
 
-                for entity in detection['entities']:
-                    col_results['total_entities'] += 1
+                for entity in detection["entities"]:
+                    col_results["total_entities"] += 1
 
-                    etype = entity['type']
-                    if etype not in col_results['entity_types']:
-                        col_results['entity_types'][etype] = 0
-                    col_results['entity_types'][etype] += 1
+                    etype = entity["type"]
+                    if etype not in col_results["entity_types"]:
+                        col_results["entity_types"][etype] = 0
+                    col_results["entity_types"][etype] += 1
 
-                    if len(col_results['sample_entities']) < 5:
-                        col_results['sample_entities'].append(entity)
+                    if len(col_results["sample_entities"]) < 5:
+                        col_results["sample_entities"].append(entity)
 
-                if detection['pii_detected']:
-                    col_results['pii_detected'] = True
-                if detection['spi_detected']:
-                    col_results['spi_detected'] = True
+                if detection["pii_detected"]:
+                    col_results["pii_detected"] = True
+                if detection["spi_detected"]:
+                    col_results["spi_detected"] = True
 
-            results['columns'][col_name] = col_results
+            results["columns"][col_name] = col_results
 
         return results
 
-    def get_suggested_tags(
-        self,
-        scan_results: Dict[str, Any]
-    ) -> Dict[str, Dict[str, Any]]:
+    def get_suggested_tags(self, scan_results: dict[str, Any]) -> dict[str, dict[str, Any]]:
         """
         Generate GDPR tag suggestions based on ML scan results.
 
@@ -5136,25 +4837,21 @@ class MLPIIDetector:
         """
         suggestions = {}
 
-        for col_name, col_results in scan_results.get('columns', {}).items():
-            if col_results.get('pii_detected') or col_results.get('spi_detected'):
+        for col_name, col_results in scan_results.get("columns", {}).items():
+            if col_results.get("pii_detected") or col_results.get("spi_detected"):
                 # Determine category based on entity types
-                entity_types = col_results.get('entity_types', {})
+                entity_types = col_results.get("entity_types", {})
 
-                has_spi = any(
-                    self.PII_ENTITY_TYPES.get(et) == 'SPI'
-                    for et in entity_types.keys()
-                )
+                has_spi = any(self.PII_ENTITY_TYPES.get(et) == "SPI" for et in entity_types)
 
                 suggestions[col_name] = {
-                    'gdpr_category': 'SPI' if has_spi else 'PII',
-                    'sensitivity': 'VERY_HIGH' if has_spi else 'HIGH',
-                    'detection_method': 'ml',
-                    'entity_types_found': list(entity_types.keys()),
-                    'confidence': min(
-                        1.0,
-                        col_results['total_entities'] / 10
-                    )  # More entities = higher confidence
+                    "gdpr_category": "SPI" if has_spi else "PII",
+                    "sensitivity": "VERY_HIGH" if has_spi else "HIGH",
+                    "detection_method": "ml",
+                    "entity_types_found": list(entity_types.keys()),
+                    "confidence": min(
+                        1.0, col_results["total_entities"] / 10
+                    ),  # More entities = higher confidence
                 }
 
         return suggestions
@@ -5164,9 +4861,7 @@ class MLPIIDetector:
         self._custom_patterns[name] = pattern
 
     def train_custom_detector(
-        self,
-        training_data: List[Tuple[str, List[Tuple[int, int, str]]]],
-        model_path: str
+        self, training_data: list[tuple[str, list[tuple[int, int, str]]]], model_path: str
     ) -> None:
         """
         Train a custom NER model for domain-specific PII.
@@ -5181,9 +4876,7 @@ class MLPIIDetector:
 
         # This is a placeholder for custom training
         # Full implementation would use spaCy's training capabilities
-        logger.info(
-            f"Training custom NER model with {len(training_data)} examples..."
-        )
+        logger.info(f"Training custom NER model with {len(training_data)} examples...")
 
         # Convert training data to spaCy format
         # ... training logic would go here ...
@@ -5199,22 +4892,24 @@ class MLPIIDetector:
 @dataclass
 class LineageNode:
     """Represents a node in the data lineage graph."""
+
     node_id: str
     node_type: str  # 'dataset', 'transformation', 'column'
     name: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    gdpr_tags: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    gdpr_tags: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime.datetime = field(default_factory=datetime.datetime.now)
 
 
 @dataclass
 class LineageEdge:
     """Represents an edge (relationship) in the lineage graph."""
+
     edge_id: str
     source_id: str
     target_id: str
     operation: str  # 'derived_from', 'transformed_by', 'merged_with'
-    details: Dict[str, Any] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime.datetime = field(default_factory=datetime.datetime.now)
 
 
@@ -5231,9 +4926,9 @@ class DataLineageTracker:
 
     def __init__(
         self,
-        config: Optional[ConfigManager] = None,
-        storage_path: Optional[str] = None,
-        audit_manager: Optional[AuditManager] = None
+        config: ConfigManager | None = None,
+        storage_path: str | None = None,
+        audit_manager: AuditManager | None = None,
     ):
         """
         Initialize the lineage tracker.
@@ -5248,9 +4943,9 @@ class DataLineageTracker:
         self.audit = audit_manager
 
         # Lineage graph
-        self._nodes: Dict[str, LineageNode] = {}
-        self._edges: Dict[str, LineageEdge] = {}
-        self._column_lineage: Dict[str, List[str]] = {}  # column -> source columns
+        self._nodes: dict[str, LineageNode] = {}
+        self._edges: dict[str, LineageEdge] = {}
+        self._column_lineage: dict[str, list[str]] = {}  # column -> source columns
 
         # Create storage directory
         self.storage_path.mkdir(parents=True, exist_ok=True)
@@ -5265,9 +4960,9 @@ class DataLineageTracker:
     def register_dataset(
         self,
         name: str,
-        schema: Optional[Dict[str, str]] = None,
-        gdpr_tags: Optional[Dict[str, Dict[str, Any]]] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        schema: dict[str, str] | None = None,
+        gdpr_tags: dict[str, dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """
         Register a dataset in the lineage graph.
@@ -5285,13 +4980,10 @@ class DataLineageTracker:
 
         node = LineageNode(
             node_id=node_id,
-            node_type='dataset',
+            node_type="dataset",
             name=name,
-            metadata={
-                'schema': schema or {},
-                **(metadata or {})
-            },
-            gdpr_tags=gdpr_tags or {}
+            metadata={"schema": schema or {}, **(metadata or {})},
+            gdpr_tags=gdpr_tags or {},
         )
 
         self._nodes[node_id] = node
@@ -5302,10 +4994,10 @@ class DataLineageTracker:
                 col_node_id = f"col_{node_id}_{col_name}"
                 col_node = LineageNode(
                     node_id=col_node_id,
-                    node_type='column',
+                    node_type="column",
                     name=f"{name}.{col_name}",
-                    metadata={'data_type': col_type, 'parent_dataset': node_id},
-                    gdpr_tags=gdpr_tags.get(col_name, {}) if gdpr_tags else {}
+                    metadata={"data_type": col_type, "parent_dataset": node_id},
+                    gdpr_tags=gdpr_tags.get(col_name, {}) if gdpr_tags else {},
                 )
                 self._nodes[col_node_id] = col_node
 
@@ -5318,10 +5010,10 @@ class DataLineageTracker:
         self,
         name: str,
         operation_type: str,
-        source_ids: List[str],
+        source_ids: list[str],
         target_id: str,
-        column_mappings: Optional[Dict[str, List[str]]] = None,
-        details: Optional[Dict[str, Any]] = None
+        column_mappings: dict[str, list[str]] | None = None,
+        details: dict[str, Any] | None = None,
     ) -> str:
         """
         Register a data transformation in the lineage graph.
@@ -5342,12 +5034,9 @@ class DataLineageTracker:
         # Create transformation node
         node = LineageNode(
             node_id=transform_id,
-            node_type='transformation',
+            node_type="transformation",
             name=name,
-            metadata={
-                'operation_type': operation_type,
-                **(details or {})
-            }
+            metadata={"operation_type": operation_type, **(details or {})},
         )
         self._nodes[transform_id] = node
 
@@ -5355,20 +5044,14 @@ class DataLineageTracker:
         for source_id in source_ids:
             edge_id = f"e_{self._generate_id()}"
             edge = LineageEdge(
-                edge_id=edge_id,
-                source_id=source_id,
-                target_id=transform_id,
-                operation='input_to'
+                edge_id=edge_id, source_id=source_id, target_id=transform_id, operation="input_to"
             )
             self._edges[edge_id] = edge
 
         # Create edge from transformation to target
         edge_id = f"e_{self._generate_id()}"
         edge = LineageEdge(
-            edge_id=edge_id,
-            source_id=transform_id,
-            target_id=target_id,
-            operation='produces'
+            edge_id=edge_id, source_id=transform_id, target_id=target_id, operation="produces"
         )
         self._edges[edge_id] = edge
 
@@ -5388,10 +5071,10 @@ class DataLineageTracker:
                 action="register_transformation",
                 resource=name,
                 details={
-                    'operation_type': operation_type,
-                    'sources': source_ids,
-                    'target': target_id
-                }
+                    "operation_type": operation_type,
+                    "sources": source_ids,
+                    "target": target_id,
+                },
             )
 
         logger.info(f"Registered transformation: {name} (ID: {transform_id})")
@@ -5401,8 +5084,8 @@ class DataLineageTracker:
         self,
         source_id: str,
         target_id: str,
-        columns_anonymized: Dict[str, str],
-        method: str = 'auto_anonymize'
+        columns_anonymized: dict[str, str],
+        method: str = "auto_anonymize",
     ) -> str:
         """
         Track an anonymization operation.
@@ -5416,26 +5099,19 @@ class DataLineageTracker:
         Returns:
             Transformation ID.
         """
-        column_mappings = {col: [col] for col in columns_anonymized.keys()}
+        column_mappings = {col: [col] for col in columns_anonymized}
 
         return self.register_transformation(
             name=f"anonymize_{self._generate_id()}",
-            operation_type='anonymization',
+            operation_type="anonymization",
             source_ids=[source_id],
             target_id=target_id,
             column_mappings=column_mappings,
-            details={
-                'anonymization_methods': columns_anonymized,
-                'method': method
-            }
+            details={"anonymization_methods": columns_anonymized, "method": method},
         )
 
     def track_erasure(
-        self,
-        source_id: str,
-        target_id: str,
-        subject_id: str,
-        columns_erased: List[str]
+        self, source_id: str, target_id: str, subject_id: str, columns_erased: list[str]
     ) -> str:
         """
         Track a data erasure operation (GDPR right to be forgotten).
@@ -5451,22 +5127,18 @@ class DataLineageTracker:
         """
         return self.register_transformation(
             name=f"erasure_{subject_id}_{self._generate_id()}",
-            operation_type='erasure',
+            operation_type="erasure",
             source_ids=[source_id],
             target_id=target_id,
             column_mappings={col: [col] for col in columns_erased},
             details={
-                'subject_id': subject_id,
-                'columns_erased': columns_erased,
-                'gdpr_article': 'Art. 17 - Right to erasure'
-            }
+                "subject_id": subject_id,
+                "columns_erased": columns_erased,
+                "gdpr_article": "Art. 17 - Right to erasure",
+            },
         )
 
-    def get_upstream_lineage(
-        self,
-        node_id: str,
-        depth: int = 10
-    ) -> Dict[str, Any]:
+    def get_upstream_lineage(self, node_id: str, depth: int = 10) -> dict[str, Any]:
         """
         Get upstream lineage (data sources) for a node.
 
@@ -5478,7 +5150,7 @@ class DataLineageTracker:
             Upstream lineage graph.
         """
         visited = set()
-        lineage = {'nodes': [], 'edges': []}
+        lineage = {"nodes": [], "edges": []}
 
         def traverse(current_id: str, current_depth: int):
             if current_depth <= 0 or current_id in visited:
@@ -5488,31 +5160,31 @@ class DataLineageTracker:
 
             if current_id in self._nodes:
                 node = self._nodes[current_id]
-                lineage['nodes'].append({
-                    'id': node.node_id,
-                    'type': node.node_type,
-                    'name': node.name,
-                    'gdpr_tags': node.gdpr_tags
-                })
+                lineage["nodes"].append(
+                    {
+                        "id": node.node_id,
+                        "type": node.node_type,
+                        "name": node.name,
+                        "gdpr_tags": node.gdpr_tags,
+                    }
+                )
 
             # Find incoming edges
             for edge in self._edges.values():
                 if edge.target_id == current_id:
-                    lineage['edges'].append({
-                        'source': edge.source_id,
-                        'target': edge.target_id,
-                        'operation': edge.operation
-                    })
+                    lineage["edges"].append(
+                        {
+                            "source": edge.source_id,
+                            "target": edge.target_id,
+                            "operation": edge.operation,
+                        }
+                    )
                     traverse(edge.source_id, current_depth - 1)
 
         traverse(node_id, depth)
         return lineage
 
-    def get_downstream_lineage(
-        self,
-        node_id: str,
-        depth: int = 10
-    ) -> Dict[str, Any]:
+    def get_downstream_lineage(self, node_id: str, depth: int = 10) -> dict[str, Any]:
         """
         Get downstream lineage (derived datasets) for a node.
 
@@ -5524,7 +5196,7 @@ class DataLineageTracker:
             Downstream lineage graph.
         """
         visited = set()
-        lineage = {'nodes': [], 'edges': []}
+        lineage = {"nodes": [], "edges": []}
 
         def traverse(current_id: str, current_depth: int):
             if current_depth <= 0 or current_id in visited:
@@ -5534,31 +5206,31 @@ class DataLineageTracker:
 
             if current_id in self._nodes:
                 node = self._nodes[current_id]
-                lineage['nodes'].append({
-                    'id': node.node_id,
-                    'type': node.node_type,
-                    'name': node.name,
-                    'gdpr_tags': node.gdpr_tags
-                })
+                lineage["nodes"].append(
+                    {
+                        "id": node.node_id,
+                        "type": node.node_type,
+                        "name": node.name,
+                        "gdpr_tags": node.gdpr_tags,
+                    }
+                )
 
             # Find outgoing edges
             for edge in self._edges.values():
                 if edge.source_id == current_id:
-                    lineage['edges'].append({
-                        'source': edge.source_id,
-                        'target': edge.target_id,
-                        'operation': edge.operation
-                    })
+                    lineage["edges"].append(
+                        {
+                            "source": edge.source_id,
+                            "target": edge.target_id,
+                            "operation": edge.operation,
+                        }
+                    )
                     traverse(edge.target_id, current_depth - 1)
 
         traverse(node_id, depth)
         return lineage
 
-    def get_column_lineage(
-        self,
-        dataset_id: str,
-        column_name: str
-    ) -> List[Dict[str, Any]]:
+    def get_column_lineage(self, dataset_id: str, column_name: str) -> list[dict[str, Any]]:
         """
         Get column-level lineage.
 
@@ -5579,19 +5251,13 @@ class DataLineageTracker:
 
             if current_col_id in self._column_lineage:
                 for source in self._column_lineage[current_col_id]:
-                    sources.append({
-                        'column_id': source,
-                        'node': self._nodes.get(source)
-                    })
+                    sources.append({"column_id": source, "node": self._nodes.get(source)})
                     trace_column(source, visited)
 
         trace_column(col_id, set())
         return sources
 
-    def impact_analysis(
-        self,
-        node_id: str
-    ) -> Dict[str, Any]:
+    def impact_analysis(self, node_id: str) -> dict[str, Any]:
         """
         Perform impact analysis for a dataset or column change.
 
@@ -5606,44 +5272,37 @@ class DataLineageTracker:
         node = self._nodes.get(node_id)
 
         analysis = {
-            'source_node': {
-                'id': node_id,
-                'name': node.name if node else 'Unknown',
-                'type': node.node_type if node else 'Unknown'
+            "source_node": {
+                "id": node_id,
+                "name": node.name if node else "Unknown",
+                "type": node.node_type if node else "Unknown",
             },
-            'affected_datasets': [],
-            'affected_transformations': [],
-            'gdpr_impact': {
-                'pii_affected': False,
-                'spi_affected': False,
-                'affected_columns': []
-            }
+            "affected_datasets": [],
+            "affected_transformations": [],
+            "gdpr_impact": {"pii_affected": False, "spi_affected": False, "affected_columns": []},
         }
 
-        for ln_node in downstream['nodes']:
-            if ln_node['type'] == 'dataset':
-                analysis['affected_datasets'].append(ln_node)
-            elif ln_node['type'] == 'transformation':
-                analysis['affected_transformations'].append(ln_node)
+        for ln_node in downstream["nodes"]:
+            if ln_node["type"] == "dataset":
+                analysis["affected_datasets"].append(ln_node)
+            elif ln_node["type"] == "transformation":
+                analysis["affected_transformations"].append(ln_node)
 
             # Check GDPR impact
-            gdpr_tags = ln_node.get('gdpr_tags', {})
+            gdpr_tags = ln_node.get("gdpr_tags", {})
             for col, tags in gdpr_tags.items():
                 if isinstance(tags, dict):
-                    category = tags.get('gdpr_category')
-                    if category == 'PII':
-                        analysis['gdpr_impact']['pii_affected'] = True
-                        analysis['gdpr_impact']['affected_columns'].append(col)
-                    elif category == 'SPI':
-                        analysis['gdpr_impact']['spi_affected'] = True
-                        analysis['gdpr_impact']['affected_columns'].append(col)
+                    category = tags.get("gdpr_category")
+                    if category == "PII":
+                        analysis["gdpr_impact"]["pii_affected"] = True
+                        analysis["gdpr_impact"]["affected_columns"].append(col)
+                    elif category == "SPI":
+                        analysis["gdpr_impact"]["spi_affected"] = True
+                        analysis["gdpr_impact"]["affected_columns"].append(col)
 
         return analysis
 
-    def generate_dsar_lineage_report(
-        self,
-        subject_id: str
-    ) -> Dict[str, Any]:
+    def generate_dsar_lineage_report(self, subject_id: str) -> dict[str, Any]:
         """
         Generate a Data Subject Access Request lineage report.
 
@@ -5657,42 +5316,44 @@ class DataLineageTracker:
             DSAR lineage report.
         """
         report = {
-            'subject_id': subject_id,
-            'generated_at': datetime.datetime.now().isoformat(),
-            'data_processing_history': [],
-            'erasure_operations': [],
-            'current_data_locations': []
+            "subject_id": subject_id,
+            "generated_at": datetime.datetime.now().isoformat(),
+            "data_processing_history": [],
+            "erasure_operations": [],
+            "current_data_locations": [],
         }
 
         # Find all nodes related to this subject
         for node_id, node in self._nodes.items():
             # Check transformations for subject references
-            if node.node_type == 'transformation':
+            if node.node_type == "transformation":
                 details = node.metadata
 
                 # Check for erasure operations
-                if details.get('operation_type') == 'erasure':
-                    if details.get('subject_id') == subject_id:
-                        report['erasure_operations'].append({
-                            'timestamp': node.timestamp.isoformat(),
-                            'columns_erased': details.get('columns_erased', []),
-                            'transformation_id': node_id
-                        })
+                if (
+                    details.get("operation_type") == "erasure"
+                    and details.get("subject_id") == subject_id
+                ):
+                    report["erasure_operations"].append(
+                        {
+                            "timestamp": node.timestamp.isoformat(),
+                            "columns_erased": details.get("columns_erased", []),
+                            "transformation_id": node_id,
+                        }
+                    )
 
                 # Add to processing history
-                report['data_processing_history'].append({
-                    'operation': node.name,
-                    'type': details.get('operation_type'),
-                    'timestamp': node.timestamp.isoformat()
-                })
+                report["data_processing_history"].append(
+                    {
+                        "operation": node.name,
+                        "type": details.get("operation_type"),
+                        "timestamp": node.timestamp.isoformat(),
+                    }
+                )
 
         return report
 
-    def export_lineage_graph(
-        self,
-        output_path: str,
-        format: str = 'json'
-    ) -> None:
+    def export_lineage_graph(self, output_path: str, format: str = "json") -> None:
         """
         Export the complete lineage graph.
 
@@ -5700,123 +5361,121 @@ class DataLineageTracker:
             output_path: Output file path.
             format: Export format ('json', 'graphml', 'mermaid').
         """
-        if format == 'json':
+        if format == "json":
             graph = {
-                'nodes': [
+                "nodes": [
                     {
-                        'id': n.node_id,
-                        'type': n.node_type,
-                        'name': n.name,
-                        'metadata': n.metadata,
-                        'gdpr_tags': n.gdpr_tags,
-                        'timestamp': n.timestamp.isoformat()
+                        "id": n.node_id,
+                        "type": n.node_type,
+                        "name": n.name,
+                        "metadata": n.metadata,
+                        "gdpr_tags": n.gdpr_tags,
+                        "timestamp": n.timestamp.isoformat(),
                     }
                     for n in self._nodes.values()
                 ],
-                'edges': [
+                "edges": [
                     {
-                        'id': e.edge_id,
-                        'source': e.source_id,
-                        'target': e.target_id,
-                        'operation': e.operation,
-                        'details': e.details,
-                        'timestamp': e.timestamp.isoformat()
+                        "id": e.edge_id,
+                        "source": e.source_id,
+                        "target": e.target_id,
+                        "operation": e.operation,
+                        "details": e.details,
+                        "timestamp": e.timestamp.isoformat(),
                     }
                     for e in self._edges.values()
                 ],
-                'column_lineage': self._column_lineage
+                "column_lineage": self._column_lineage,
             }
 
-            with open(output_path, 'w') as f:
+            with open(output_path, "w") as f:
                 json.dump(graph, f, indent=2)
 
-        elif format == 'mermaid':
-            lines = ['graph LR']
+        elif format == "mermaid":
+            lines = ["graph LR"]
 
             for node in self._nodes.values():
-                shape = {'dataset': '[(', 'transformation': '{{', 'column': '['}.get(
-                    node.node_type, '['
+                shape = {"dataset": "[(", "transformation": "{{", "column": "["}.get(
+                    node.node_type, "["
                 )
-                end_shape = {'dataset': ')]', 'transformation': '}}', 'column': ']'}.get(
-                    node.node_type, ']'
+                end_shape = {"dataset": ")]", "transformation": "}}", "column": "]"}.get(
+                    node.node_type, "]"
                 )
-                lines.append(f"    {node.node_id}{shape}\"{node.name}\"{end_shape}")
+                lines.append(f'    {node.node_id}{shape}"{node.name}"{end_shape}')
 
             for edge in self._edges.values():
                 lines.append(f"    {edge.source_id} -->|{edge.operation}| {edge.target_id}")
 
-            with open(output_path, 'w') as f:
-                f.write('\n'.join(lines))
+            with open(output_path, "w") as f:
+                f.write("\n".join(lines))
 
         logger.info(f"Lineage graph exported to {output_path}")
 
     def _save_lineage(self) -> None:
         """Save lineage data to storage."""
         data = {
-            'nodes': {
+            "nodes": {
                 k: {
-                    'node_id': v.node_id,
-                    'node_type': v.node_type,
-                    'name': v.name,
-                    'metadata': v.metadata,
-                    'gdpr_tags': v.gdpr_tags,
-                    'timestamp': v.timestamp.isoformat()
+                    "node_id": v.node_id,
+                    "node_type": v.node_type,
+                    "name": v.name,
+                    "metadata": v.metadata,
+                    "gdpr_tags": v.gdpr_tags,
+                    "timestamp": v.timestamp.isoformat(),
                 }
                 for k, v in self._nodes.items()
             },
-            'edges': {
+            "edges": {
                 k: {
-                    'edge_id': v.edge_id,
-                    'source_id': v.source_id,
-                    'target_id': v.target_id,
-                    'operation': v.operation,
-                    'details': v.details,
-                    'timestamp': v.timestamp.isoformat()
+                    "edge_id": v.edge_id,
+                    "source_id": v.source_id,
+                    "target_id": v.target_id,
+                    "operation": v.operation,
+                    "details": v.details,
+                    "timestamp": v.timestamp.isoformat(),
                 }
                 for k, v in self._edges.items()
             },
-            'column_lineage': self._column_lineage
+            "column_lineage": self._column_lineage,
         }
 
-        with open(self.storage_path / 'lineage.json', 'w') as f:
+        with open(self.storage_path / "lineage.json", "w") as f:
             json.dump(data, f, indent=2)
 
     def _load_lineage(self) -> None:
         """Load lineage data from storage."""
-        lineage_file = self.storage_path / 'lineage.json'
+        lineage_file = self.storage_path / "lineage.json"
 
         if not lineage_file.exists():
             return
 
         try:
-            with open(lineage_file, 'r') as f:
+            with open(lineage_file) as f:
                 data = json.load(f)
 
-            for k, v in data.get('nodes', {}).items():
+            for k, v in data.get("nodes", {}).items():
                 self._nodes[k] = LineageNode(
-                    node_id=v['node_id'],
-                    node_type=v['node_type'],
-                    name=v['name'],
-                    metadata=v.get('metadata', {}),
-                    gdpr_tags=v.get('gdpr_tags', {}),
-                    timestamp=datetime.datetime.fromisoformat(v['timestamp'])
+                    node_id=v["node_id"],
+                    node_type=v["node_type"],
+                    name=v["name"],
+                    metadata=v.get("metadata", {}),
+                    gdpr_tags=v.get("gdpr_tags", {}),
+                    timestamp=datetime.datetime.fromisoformat(v["timestamp"]),
                 )
 
-            for k, v in data.get('edges', {}).items():
+            for k, v in data.get("edges", {}).items():
                 self._edges[k] = LineageEdge(
-                    edge_id=v['edge_id'],
-                    source_id=v['source_id'],
-                    target_id=v['target_id'],
-                    operation=v['operation'],
-                    details=v.get('details', {}),
-                    timestamp=datetime.datetime.fromisoformat(v['timestamp'])
+                    edge_id=v["edge_id"],
+                    source_id=v["source_id"],
+                    target_id=v["target_id"],
+                    operation=v["operation"],
+                    details=v.get("details", {}),
+                    timestamp=datetime.datetime.fromisoformat(v["timestamp"]),
                 )
 
-            self._column_lineage = data.get('column_lineage', {})
+            self._column_lineage = data.get("column_lineage", {})
 
-            logger.info(
-                f"Loaded lineage: {len(self._nodes)} nodes, {len(self._edges)} edges"
-            )
+            logger.info(f"Loaded lineage: {len(self._nodes)} nodes, {len(self._edges)} edges")
         except Exception as e:
             logger.warning(f"Could not load lineage data: {e}")
 
@@ -5848,7 +5507,7 @@ Examples:
 
   # Run benchmark
   python -m spart benchmark --rows 100000 --columns 10
-        """
+        """,
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -5857,19 +5516,21 @@ Examples:
     scan_parser = subparsers.add_parser("scan", help="Scan data for PII")
     scan_parser.add_argument("--input", "-i", required=True, help="Input file path")
     scan_parser.add_argument("--output", "-o", help="Output results file")
-    scan_parser.add_argument("--format", "-f", default="auto",
-                             choices=["auto", "parquet", "csv", "json"])
-    scan_parser.add_argument("--sample", "-s", type=int, default=1000,
-                             help="Sample size for content scanning")
+    scan_parser.add_argument(
+        "--format", "-f", default="auto", choices=["auto", "parquet", "csv", "json"]
+    )
+    scan_parser.add_argument(
+        "--sample", "-s", type=int, default=1000, help="Sample size for content scanning"
+    )
 
     # Anonymize command
     anon_parser = subparsers.add_parser("anonymize", help="Anonymize data")
     anon_parser.add_argument("--input", "-i", required=True, help="Input file path")
     anon_parser.add_argument("--output", "-o", required=True, help="Output file path")
-    anon_parser.add_argument("--mask", "-m", action="append",
-                             help="Mask rule: column:type (hash/partial/redact)")
-    anon_parser.add_argument("--pseudo", "-p", action="append",
-                             help="Column to pseudonymize")
+    anon_parser.add_argument(
+        "--mask", "-m", action="append", help="Mask rule: column:type (hash/partial/redact)"
+    )
+    anon_parser.add_argument("--pseudo", "-p", action="append", help="Column to pseudonymize")
     anon_parser.add_argument("--salt", help="Salt for pseudonymization")
     anon_parser.add_argument("--format", "-f", default="auto")
 
@@ -5878,15 +5539,16 @@ Examples:
     report_parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
     report_parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
     report_parser.add_argument("--output", "-o", required=True, help="Output file path")
-    report_parser.add_argument("--audit-path", default="./audit_logs",
-                               help="Path to audit logs")
+    report_parser.add_argument("--audit-path", default="./audit_logs", help="Path to audit logs")
 
     # Benchmark command
     bench_parser = subparsers.add_parser("benchmark", help="Run performance benchmark")
-    bench_parser.add_argument("--rows", "-r", type=int, default=100000,
-                              help="Number of rows to generate")
-    bench_parser.add_argument("--columns", "-c", type=int, default=10,
-                              help="Number of columns to generate")
+    bench_parser.add_argument(
+        "--rows", "-r", type=int, default=100000, help="Number of rows to generate"
+    )
+    bench_parser.add_argument(
+        "--columns", "-c", type=int, default=10, help="Number of columns to generate"
+    )
     bench_parser.add_argument("--output", "-o", help="Output results file")
 
     # Config command
@@ -5946,7 +5608,7 @@ def _cli_scan(args):
 
     # Output results
     if args.output:
-        with open(args.output, 'w') as f:
+        with open(args.output, "w") as f:
             json.dump(results, f, indent=2)
         print(f"Scan results saved to {args.output}")
     else:
@@ -6032,15 +5694,13 @@ def _cli_benchmark(args):
     # Run benchmark
     benchmark = Benchmark(spark)
     results = benchmark.run_anonymization_benchmark(
-        spark_df=spark_df,
-        pandas_df=pandas_df,
-        columns_to_mask=["col_0", "col_1"]
+        spark_df=spark_df, pandas_df=pandas_df, columns_to_mask=["col_0", "col_1"]
     )
 
     benchmark.print_results()
 
     if args.output:
-        with open(args.output, 'w') as f:
+        with open(args.output, "w") as f:
             json.dump(results, f, indent=2, default=str)
         print(f"\nResults saved to {args.output}")
 
@@ -6074,13 +5734,10 @@ def usage_example():
     """
     Library usage demonstration with all new features.
     """
-    from pyspark.sql.types import StructType, StructField, StringType, DoubleType, DateType
+    from pyspark.sql.types import DoubleType, StringType, StructType
 
     # Create a Spark session
-    spark = SparkSession.builder \
-        .appName("GDPR Full Example") \
-        .master("local[*]") \
-        .getOrCreate()
+    spark = SparkSession.builder.appName("GDPR Full Example").master("local[*]").getOrCreate()
 
     # Sample data
     data = [
@@ -6089,14 +5746,16 @@ def usage_example():
         ("USR003", "Bob Wilson", "bob@email.com", "789 Pine Rd", 65000.0, "2024-03-10"),
     ]
 
-    schema = StructType([
-        StructField("user_id", StringType(), True),
-        StructField("name", StringType(), True),
-        StructField("email", StringType(), True),
-        StructField("address", StringType(), True),
-        StructField("salary", DoubleType(), True),
-        StructField("hire_date", StringType(), True)
-    ])
+    schema = StructType(
+        [
+            StructField("user_id", StringType(), True),
+            StructField("name", StringType(), True),
+            StructField("email", StringType(), True),
+            StructField("address", StringType(), True),
+            StructField("salary", DoubleType(), True),
+            StructField("hire_date", StringType(), True),
+        ]
+    )
 
     df = spark.createDataFrame(data, schema)
 
@@ -6139,7 +5798,7 @@ def usage_example():
         subject_id="USR001",
         purpose="analytics",
         status=ConsentStatus.GRANTED,
-        legal_basis="consent"
+        legal_basis="consent",
     )
     has_consent, _ = consent_mgr.check_consent("USR001", "analytics")
     print(f"   USR001 consent for analytics: {has_consent}")
@@ -6156,9 +5815,7 @@ def usage_example():
     print("6. ADVANCED ANONYMIZATION")
     advanced = AdvancedAnonymization(spark, config)
 
-    k_anon_check = advanced.check_k_anonymity(
-        df, ["address"], k=2
-    )
+    k_anon_check = advanced.check_k_anonymity(df, ["address"], k=2)
     print(f"   K-anonymity check (k=2): {k_anon_check['is_k_anonymous']}")
 
     # 7. Pandas Backend (if available)
@@ -6190,6 +5847,7 @@ def usage_example():
 # Entry point
 if __name__ == "__main__":
     import sys
+
     if len(sys.argv) > 1:
         run_cli()
     else:

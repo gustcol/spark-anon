@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "Spark GDPR & Privacy Library for managing metadata, tags, and compliance in data pipelines"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
     {name = "Gustavo C Lima"},
 ]
@@ -14,10 +14,10 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
     "Topic :: Security",
 ]
@@ -29,12 +29,12 @@ dependencies = [
 [project.optional-dependencies]
 polars = [
     "polars>=1.0.0",
-    "pyarrow>=15.0.0",
+    "pyarrow>=19.0.0",
 ]
 pandas = [
     "pandas>=2.2.0",
     "numpy>=1.24.0",
-    "pyarrow>=15.0.0",
+    "pyarrow>=19.0.0",
 ]
 yaml = [
     "pyyaml>=6.0",
@@ -54,9 +54,10 @@ all = [
 ]
 dev = [
     "ty>=0.0.19",
-    "ruff>=0.9.0",
+    "ruff>=0.15.0",
     "pre-commit>=4.0.0",
-    "pyarrow>=15.0.0",
+    "pyarrow>=19.0.0",
+    "pytest>=8.0.0",
 ]
 
 [project.urls]
@@ -80,7 +81,7 @@ call-non-callable = "warn"
 unresolved-import = "warn"
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py310"
 line-length = 100
 
 [tool.ruff.lint]
@@ -88,6 +89,7 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
 ignore = [
     "E501",    # line too long - handled by formatter
     "B905",    # zip without strict
+    "N812",    # lowercase imported as non-lowercase (PySpark `functions as F` convention)
 ]
 
 [tool.ruff.lint.isort]
