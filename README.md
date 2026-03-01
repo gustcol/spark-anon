@@ -62,9 +62,9 @@ This section provides detailed instructions for downloading **spark-anon** from 
 
 Before downloading, ensure you have:
 
-- **Python 3.8+** installed
+- **Python 3.9+** installed
 - **Git** (for clone method) or **curl/wget** (for direct download)
-- **PySpark 3.3.0+** installed in your environment
+- **PySpark 4.0+** installed in your environment
 
 ### Method 1: Git Clone (Recommended)
 
@@ -401,18 +401,18 @@ classDiagram
 
 **Required:**
 ```
-Python >= 3.8
-PySpark >= 3.3.0
-Apache Spark >= 3.3.0
+Python >= 3.9
+PySpark >= 4.0.0
+Apache Spark >= 4.0.0
 ```
 
 **Optional (for enhanced features):**
 ```
-polars >= 0.20.0       # For PolarsProcessor backend (RECOMMENDED - 5-10x faster than Pandas)
+polars >= 1.0.0        # For PolarsProcessor backend (RECOMMENDED - 5-10x faster than Pandas)
+pyarrow >= 15.0.0      # Required for Polars/Pandas interop
 pandas >= 2.2.0        # For PandasProcessor backend
 numpy >= 1.24.0        # For differential privacy
 PyYAML >= 6.0          # For YAML configuration
-packaging >= 21.0      # For version checking
 requests >= 2.28.0     # For Apache Atlas integration
 boto3 >= 1.26.0        # For AWS Glue integration
 spacy >= 3.5.0         # For ML PII detection (spaCy backend)
@@ -421,7 +421,7 @@ transformers >= 4.30.0 # For ML PII detection (Hugging Face backend)
 
 **Recommended installation for best performance:**
 ```bash
-pip install polars pandas numpy pyyaml
+pip install polars pandas numpy pyyaml pyarrow
 ```
 
 **Optional (for Apache Iceberg):**
@@ -442,19 +442,23 @@ After downloading from https://github.com/gustcol/spark-anon, you'll find the fo
 
 ```
 spark-anon/
-├── spart.py              # Main library - the core module you'll import
-├── test_spart.py         # Comprehensive test suite (84 tests)
-├── README.md             # This documentation file
-└── .gitignore            # Git ignore configuration
+├── spart.py                  # Main library - the core module you'll import
+├── test_spart.py             # Comprehensive test suite (112 tests)
+├── pyproject.toml            # Project configuration, dependencies, and tooling
+├── .pre-commit-config.yaml   # Pre-commit hooks (ruff, ty, standard checks)
+├── README.md                 # This documentation file
+└── .gitignore                # Git ignore configuration
 ```
 
 ### File Descriptions
 
 | File | Purpose | Size |
 |------|---------|------|
-| `spart.py` | Core library containing all GDPR compliance classes | ~50 KB |
-| `test_spart.py` | Comprehensive test suite (84 tests) - run with `python test_spart.py` | ~40 KB |
-| `README.md` | Complete documentation with examples and diagrams | ~45 KB |
+| `spart.py` | Core library containing all GDPR compliance classes | ~200 KB |
+| `test_spart.py` | Comprehensive test suite (112 tests) - run with `python test_spart.py` | ~84 KB |
+| `pyproject.toml` | Project metadata, dependencies, ty/ruff configuration | ~2 KB |
+| `.pre-commit-config.yaml` | Pre-commit hooks for code quality | ~1 KB |
+| `README.md` | Complete documentation with examples and diagrams | ~75 KB |
 
 ### What You Need
 
@@ -2233,9 +2237,9 @@ python test_spart.py
 ### Test Coverage
 
 ```mermaid
-pie title Test Distribution (108 tests)
+pie title Test Distribution (112 tests)
     "Core Components" : 25
-    "Data Processing" : 40
+    "Data Processing" : 44
     "Privacy Features" : 13
     "Enterprise Integration" : 25
     "Integration Tests" : 5
@@ -2244,7 +2248,7 @@ pie title Test Distribution (108 tests)
 **Detailed Test Breakdown:**
 - **Core:** Enums (7), ConfigManager (6), AuditManager (5), ConsentManager (5), MetadataManager (6)
 - **Processing:** PandasProcessor (9), **PolarsProcessor (12)**, Benchmark (4), BackendSelector (10), Databricks (4), RetentionManager (2), AnonymizationManager (6)
-- **Privacy:** PIIDetector (5), AdvancedAnonymization (5)
+- **Privacy:** PIIDetector (5), AdvancedAnonymization (5), Differential Privacy (3)
 - **Enterprise:** ApacheAtlasClient (5), AWSGlueCatalogClient (5), MLPIIDetector (6), DataLineageTracker (9)
 - **Integration:** Full pipeline (2)
 
@@ -2256,8 +2260,8 @@ pie title Test Distribution (108 tests)
 | ConsentManager | 5 | Record, check, withdraw consent, validation |
 | PIIDetector | 5 | Column scanning, content scanning, custom patterns |
 | AdvancedAnonymization | 5 | K-anonymity, differential privacy, generalization |
-| PandasProcessor | 9 | All masking types, k-anonymity, erasure |
-| **PolarsProcessor** | **12** | **All masking types, k-anonymity, erasure, conversions** |
+| PandasProcessor | 9 | All masking types, k-anonymity, differential privacy, erasure |
+| **PolarsProcessor** | **12** | **All masking types, k-anonymity, differential privacy, erasure, conversions** |
 | Benchmark | 4 | Recommendations (including Polars), benchmarking, results tracking |
 | BackendSelector | 10 | Auto-selection (3-tier), forced backend, conversions (all backends) |
 | Databricks/Unity Catalog | 4 | Environment detection, error handling |
@@ -2269,7 +2273,53 @@ pie title Test Distribution (108 tests)
 | **MLPIIDetector** | 6 | Backend selection, text detection, custom patterns, scanning |
 | **DataLineageTracker** | 9 | Lineage graph, transformations, impact analysis, DSAR |
 | Integration | 2 | Full pipeline, audit integration |
-| **Total** | **108** | **Full coverage of all GDPR compliance features** |
+| **Total** | **112** | **Full coverage of all GDPR compliance features** |
+
+## Development Tooling
+
+### Type Checking with ty
+
+This project uses [ty](https://github.com/astral-sh/ty) (by Astral) for type checking:
+
+```bash
+pip install ty
+ty check spart.py
+```
+
+### Linting with Ruff
+
+[Ruff](https://github.com/astral-sh/ruff) is used for linting and formatting:
+
+```bash
+pip install ruff
+ruff check spart.py
+ruff format spart.py
+```
+
+### Pre-commit Hooks
+
+Pre-commit hooks are configured for consistent code quality:
+
+```bash
+pip install pre-commit
+pre-commit install
+pre-commit run --all-files
+```
+
+The `.pre-commit-config.yaml` includes:
+- **Ruff** for linting and formatting
+- **ty** for type checking
+- Standard hooks for trailing whitespace, YAML validation, and merge conflict detection
+
+### Development Setup
+
+```bash
+# Install all dev dependencies
+pip install -e ".[dev,all]"
+
+# Or install manually
+pip install ty ruff pre-commit pyspark polars pandas numpy pyyaml pyarrow
+```
 
 ---
 
@@ -2434,12 +2484,19 @@ Contributions are welcome! Please follow these steps:
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Write tests for new functionality
-4. Ensure all tests pass (`python test_spart.py`)
-5. Run code quality checks (`ty check spart.py && ruff check spart.py`)
-6. Commit changes (`git commit -m 'Add AmazingFeature'`)
-7. Push to branch (`git push origin feature/AmazingFeature`)
-8. Open a Pull Request
+3. Install dev dependencies: `pip install -e ".[dev,all]"`
+4. Set up pre-commit hooks: `pre-commit install`
+5. Write tests for new functionality
+6. Ensure all tests pass (`python test_spart.py`)
+7. Run code quality checks:
+   ```bash
+   ty check spart.py       # Type checking
+   ruff check spart.py     # Linting
+   ruff format spart.py    # Formatting
+   ```
+8. Commit changes (`git commit -m 'Add AmazingFeature'`)
+9. Push to branch (`git push origin feature/AmazingFeature`)
+10. Open a Pull Request
 
 ---
 
@@ -2454,9 +2511,13 @@ This project is open source. See LICENSE file for details.
 - [GDPR Official Text](https://gdpr-info.eu/)
 - [12-Factor App Methodology](https://12factor.net/) - Configuration management pattern
 - [PySpark Documentation](https://spark.apache.org/docs/latest/api/python/)
+- [Polars Documentation](https://docs.pola.rs/) - Fast DataFrame library
 - [Databricks Unity Catalog](https://docs.databricks.com/data-governance/unity-catalog/index.html)
 - [Delta Lake Documentation](https://docs.delta.io/)
 - [K-Anonymity (Wikipedia)](https://en.wikipedia.org/wiki/K-anonymity)
 - [Differential Privacy (Wikipedia)](https://en.wikipedia.org/wiki/Differential_privacy)
 - [GDPR Article 17 - Right to Erasure](https://gdpr-info.eu/art-17-gdpr/)
 - [GDPR Article 30 - Records of Processing](https://gdpr-info.eu/art-30-gdpr/)
+- [ty - Type Checker](https://github.com/astral-sh/ty) - Python type checker by Astral
+- [Ruff](https://github.com/astral-sh/ruff) - Python linter and formatter
+- [pre-commit](https://pre-commit.com/) - Git hooks framework
