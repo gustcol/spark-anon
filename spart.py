@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 spark-anon: Spark GDPR & Privacy Library
 
@@ -5597,7 +5599,10 @@ def _cli_scan(args):
             fmt = "parquet"
 
     # Load data
-    df = spark.read.format(fmt).load(args.input)
+    reader = spark.read.format(fmt)
+    if fmt == "csv":
+        reader = reader.option("header", "true").option("inferSchema", "true")
+    df = reader.load(args.input)
 
     # Run PII detection
     detector = PIIDetector()
@@ -5632,7 +5637,10 @@ def _cli_anonymize(args):
             fmt = "parquet"
 
     # Load data
-    df = spark.read.format(fmt).load(args.input)
+    reader = spark.read.format(fmt)
+    if fmt == "csv":
+        reader = reader.option("header", "true").option("inferSchema", "true")
+    df = reader.load(args.input)
 
     # Initialize managers
     metadata_mgr = MetadataManager(spark)

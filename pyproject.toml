@@ -66,7 +66,7 @@ Repository = "https://github.com/gustcol/spark-anon"
 
 [build-system]
 requires = ["setuptools>=75.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["spart"]
